@@ -1,0 +1,239 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "title": "Leader Status",
+      "description": "Shows which node is the leader (1) and whether a leader exists",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "targets": [
+        {
+          "expr": "etcd_server_is_leader",
+          "legendFormat": "{{instance}} is_leader"
+        },
+        {
+          "expr": "etcd_server_has_leader",
+          "legendFormat": "{{instance}} has_leader"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true },
+          "min": 0, "max": 1.1
+        }
+      }
+    },
+    {
+      "title": "Leader Elections (cumulative)",
+      "description": "Total leader changes seen - spikes indicate elections triggered by heartbeat timeouts",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "targets": [
+        {
+          "expr": "rate(etcd_server_leader_changes_seen_total[30s])",
+          "legendFormat": "{{instance}} elections/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "bars", "lineWidth": 1, "fillOpacity": 50 },
+          "color": { "mode": "fixed", "fixedColor": "red" }
+        }
+      }
+    },
+    {
+      "title": "Heartbeat Send Failures (rate)",
+      "description": "Rate of heartbeat send failures from the leader - indicates leader is overloaded",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 6 },
+      "id": 3,
+      "targets": [
+        {
+          "expr": "rate(etcd_server_heartbeat_send_failures_total[30s])",
+          "legendFormat": "{{instance}} hb_failures/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 20 },
+          "color": { "mode": "fixed", "fixedColor": "orange" }
+        }
+      }
+    },
+    {
+      "title": "Dropped Messages by Type (send, rate)",
+      "description": "Rate of dropped outgoing Raft messages broken down by message type. Look for MsgHeartbeat and MsgHeartbeatResp drops.",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 6 },
+      "id": 4,
+      "targets": [
+        {
+          "expr": "rate(etcd_network_dropped_messages_sent_total[30s])",
+          "legendFormat": "{{instance}} send_drop {{message_type}} -> {{To}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 20 }
+        }
+      }
+    },
+    {
+      "title": "Dropped Messages by Type (recv, rate)",
+      "description": "Rate of dropped incoming Raft messages broken down by message type.",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 12 },
+      "id": 5,
+      "targets": [
+        {
+          "expr": "rate(etcd_network_dropped_messages_received_total[30s])",
+          "legendFormat": "{{instance}} recv_drop {{message_type}} <- {{From}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 20 }
+        }
+      }
+    },
+    {
+      "title": "Network Send Failures (rate)",
+      "description": "Rate of all network send failures to peers - general congestion indicator",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 12 },
+      "id": 6,
+      "targets": [
+        {
+          "expr": "rate(etcd_network_peer_sent_failures_total[30s])",
+          "legendFormat": "{{instance}} -> {{To}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 20 },
+          "color": { "mode": "fixed", "fixedColor": "yellow" }
+        }
+      }
+    },
+    {
+      "title": "Peer Round-Trip Time (p99)",
+      "description": "99th percentile RTT between peers - shows network latency increasing under congestion",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 18 },
+      "id": 7,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, rate(etcd_network_peer_round_trip_time_seconds_bucket[30s]))",
+          "legendFormat": "{{instance}} p99 RTT -> {{To}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10 },
+          "unit": "s"
+        }
+      }
+    },
+    {
+      "title": "Proposals Pending",
+      "description": "Current number of pending proposals - high values indicate backpressure from congestion",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 18 },
+      "id": 8,
+      "targets": [
+        {
+          "expr": "etcd_server_proposals_pending",
+          "legendFormat": "{{instance}} pending"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 20 }
+        }
+      }
+    },
+    {
+      "title": "Proposals Failed (rate)",
+      "description": "Rate of failed proposals - correlates with leader instability from heartbeat drops",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 24 },
+      "id": 9,
+      "targets": [
+        {
+          "expr": "rate(etcd_server_proposals_failed_total[30s])",
+          "legendFormat": "{{instance}} failures/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 20 },
+          "color": { "mode": "fixed", "fixedColor": "red" }
+        }
+      }
+    },
+    {
+      "title": "gRPC Request Rate",
+      "description": "Rate of incoming gRPC requests - shows the traffic load causing congestion",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 24 },
+      "id": 10,
+      "targets": [
+        {
+          "expr": "sum(rate(grpc_server_started_total[30s])) by (instance)",
+          "legendFormat": "{{instance}} req/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10 }
+        }
+      }
+    },
+    {
+      "title": "Correlation: Heartbeat Drops vs Leader Elections",
+      "description": "Overlay of heartbeat-related drops and leader elections to show causation",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 30 },
+      "id": 11,
+      "targets": [
+        {
+          "expr": "sum(rate(etcd_network_dropped_messages_sent_total{message_type=~\"MsgHeartbeat|MsgHeartbeatResp\"}[30s])) by (instance)",
+          "legendFormat": "{{instance}} heartbeat drops/s"
+        },
+        {
+          "expr": "rate(etcd_server_heartbeat_send_failures_total[30s])",
+          "legendFormat": "{{instance}} hb send failures/s"
+        },
+        {
+          "expr": "rate(etcd_server_leader_changes_seen_total[30s]) * 100",
+          "legendFormat": "{{instance}} elections/s (x100)"
+        },
+        {
+          "expr": "sum(rate(grpc_server_started_total[30s])) by (instance) / 1000",
+          "legendFormat": "{{instance}} grpc req/s (x0.001)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true }
+        }
+      }
+    }
+  ],
+  "refresh": "2s",
+  "schemaVersion": 39,
+  "tags": ["etcd", "raft", "observability"],
+  "templating": { "list": [] },
+  "time": { "from": "now-5m", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "etcd Raft Observability",
+  "uid": "etcd-raft-observability",
+  "version": 1
+}

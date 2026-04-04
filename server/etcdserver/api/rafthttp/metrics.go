@@ -178,6 +178,29 @@ var (
 		},
 		[]string{"To"},
 	)
+
+	// Observability metrics for tracking dropped messages by type.
+	// This allows correlating network congestion with specific message
+	// type drops (e.g., heartbeats vs appends vs proposals).
+	droppedMsgSent = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "etcd",
+			Subsystem: "network",
+			Name:      "dropped_messages_sent_total",
+			Help:      "The total number of dropped outgoing Raft messages, by message type.",
+		},
+		[]string{"message_type", "To"},
+	)
+
+	droppedMsgRecv = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "etcd",
+			Subsystem: "network",
+			Name:      "dropped_messages_received_total",
+			Help:      "The total number of dropped incoming Raft messages, by message type.",
+		},
+		[]string{"message_type", "From"},
+	)
 )
 
 func init() {
@@ -198,4 +221,7 @@ func init() {
 	prometheus.MustRegister(snapshotReceiveSeconds)
 
 	prometheus.MustRegister(rttSec)
+
+	prometheus.MustRegister(droppedMsgSent)
+	prometheus.MustRegister(droppedMsgRecv)
 }

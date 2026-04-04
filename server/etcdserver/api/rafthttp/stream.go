@@ -549,6 +549,7 @@ func (cr *streamReader) decodeLoop(rc io.ReadCloser, t streamType) error {
 				}
 			}
 			recvFailures.WithLabelValues(types.ID(m.From).String()).Inc()
+			droppedMsgRecv.WithLabelValues(m.Type.String(), types.ID(m.From).String()).Inc()
 		}
 	}
 }

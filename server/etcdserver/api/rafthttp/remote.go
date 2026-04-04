@@ -79,6 +79,7 @@ func (g *remote) send(m raftpb.Message) {
 			}
 		}
 		sentFailures.WithLabelValues(types.ID(m.To).String()).Inc()
+		droppedMsgSent.WithLabelValues(m.Type.String(), types.ID(m.To).String()).Inc()
 	}
 }
 
