@@ -196,6 +196,7 @@ func StartEtcd(inCfg *Config) (e *Etcd, err error) {
 		PeerTLSInfo:                       cfg.PeerTLSInfo,
 		TickMs:                            cfg.TickMs,
 		ElectionTicks:                     cfg.ElectionTicks(),
+		HeartbeatMark:                     cfg.HeartbeatMark,
 		InitialElectionTickAdvance:        cfg.InitialElectionTickAdvance,
 		AutoCompactionRetention:           autoCompactionRetention,
 		AutoCompactionMode:                cfg.AutoCompactionMode,

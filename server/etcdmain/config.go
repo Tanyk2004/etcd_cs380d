@@ -239,6 +239,7 @@ func (cfg *config) configFromCmdLine() error {
 	cfg.ec.CipherSuites = flags.StringsFromFlag(cfg.cf.flagSet, "cipher-suites")
 
 	cfg.ec.MaxConcurrentStreams = flags.Uint32FromFlag(cfg.cf.flagSet, "max-concurrent-streams")
+	cfg.ec.HeartbeatMark = flags.Uint32FromFlag(cfg.cf.flagSet, "heartbeat-mark")
 
 	cfg.ec.LogOutputs = flags.UniqueStringsFromFlag(cfg.cf.flagSet, "log-outputs")
 

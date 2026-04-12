@@ -119,6 +119,13 @@ type Transport struct {
 	// machine and thus stop the Transport.
 	ErrorC chan error
 
+	// HeartbeatMark, when non-zero, is set as SO_MARK on every socket opened
+	// by the stream round-tripper.  Stream connections carry Raft heartbeat
+	// and control messages; marking them lets the kernel TC BPF program
+	// (bpf/tc_prio.bpf.c) raise their scheduling priority under congestion
+	// without touching application-level traffic.
+	HeartbeatMark uint32
+
 	streamRt   http.RoundTripper // roundTripper used by streams
 	pipelineRt http.RoundTripper // roundTripper used by pipelines
 
@@ -132,7 +139,11 @@ type Transport struct {
 
 func (t *Transport) Start() error {
 	var err error
-	t.streamRt, err = newStreamRoundTripper(t.TLSInfo, t.DialTimeout)
+	if t.HeartbeatMark != 0 {
+		t.streamRt, err = newStreamRoundTripperWithMark(t.TLSInfo, t.DialTimeout, t.HeartbeatMark)
+	} else {
+		t.streamRt, err = newStreamRoundTripper(t.TLSInfo, t.DialTimeout)
+	}
 	if err != nil {
 		return err
 	}

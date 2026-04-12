@@ -60,6 +60,15 @@ func newStreamRoundTripper(tlsInfo transport.TLSInfo, dialTimeout time.Duration)
 	return transport.NewTimeoutTransport(tlsInfo, dialTimeout, ConnReadTimeout, ConnWriteTimeout)
 }
 
+// newStreamRoundTripperWithMark is like newStreamRoundTripper but additionally
+// sets SO_MARK = mark on every socket it dials.  The kernel TC BPF program
+// (bpf/tc_prio.bpf.c) uses this mark to identify Raft control-plane stream
+// connections and elevate their scheduling priority when the controller
+// determines that heartbeat latency is rising due to network congestion.
+func newStreamRoundTripperWithMark(tlsInfo transport.TLSInfo, dialTimeout time.Duration, mark uint32) (http.RoundTripper, error) {
+	return transport.NewTimeoutTransportWithMark(tlsInfo, dialTimeout, ConnReadTimeout, ConnWriteTimeout, mark)
+}
+
 // createPostRequest creates a HTTP POST request that sends raft message.
 func createPostRequest(lg *zap.Logger, u url.URL, path string, body io.Reader, ct string, urls types.URLs, from, cid types.ID) *http.Request {
 	uu := u

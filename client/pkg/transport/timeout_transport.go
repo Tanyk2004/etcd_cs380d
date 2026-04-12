@@ -49,3 +49,34 @@ func NewTimeoutTransport(info TLSInfo, dialtimeoutd, rdtimeoutd, wtimeoutd time.
 	}).Dial
 	return tr, nil
 }
+
+// NewTimeoutTransportWithMark is identical to NewTimeoutTransport but also
+// sets SO_MARK = mark on every dialed socket.  The mark lets a kernel TC BPF
+// program (tc_prio.bpf.c) identify the stream connections that carry Raft
+// heartbeat and control messages, and raise their scheduling priority without
+// touching application-level traffic.
+//
+// Requires CAP_NET_ADMIN (or root)
+func NewTimeoutTransportWithMark(info TLSInfo, dialtimeoutd, rdtimeoutd, wtimeoutd time.Duration, mark uint32) (*http.Transport, error) {
+	tr, err := NewTransport(info, dialtimeoutd)
+	if err != nil {
+		return nil, err
+	}
+
+	if rdtimeoutd != 0 || wtimeoutd != 0 {
+		tr.MaxIdleConnsPerHost = -1
+	} else {
+		tr.MaxIdleConnsPerHost = 1024
+	}
+
+	tr.Dial = (&rwTimeoutDialer{ //nolint:staticcheck // TODO: remove for a supported version
+		Dialer: net.Dialer{
+			Timeout:   dialtimeoutd,
+			KeepAlive: 30 * time.Second,
+			Control:   makeMarkControl(mark),
+		},
+		rdtimeoutd: rdtimeoutd,
+		wtimeoutd:  wtimeoutd,
+	}).Dial
+	return tr, nil
+}

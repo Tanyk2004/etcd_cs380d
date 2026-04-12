@@ -85,6 +85,7 @@ type ServerConfig struct {
 
 	TickMs        uint
 	ElectionTicks int
+	HeartbeatMark uint32
 
 	// InitialElectionTickAdvance is true, then local member fast-forwards
 	// election ticks to speed up "initial" leader election trigger. This
