@@ -1,0 +1,205 @@
+
+{
+  "scenarios": [
+    {
+      "name": "baseline_steady_state",
+      "description": "Healthy cluster under light load — zero elections expected. Used as the performance baseline for throughput and latency comparisons.",
+      "duration": "2m",
+      "election_timeout_ms": 1000,
+      "heartbeat_interval_ms": 100,
+      "phases": [
+        {"duration": "2m", "workers": 50, "qps": 1000, "value_size": 256, "read_ratio": 0.8, "parallel_sims": 1}
+      ],
+      "network": {"latency": "1ms", "jitter": "0ms", "packet_loss": 0},
+      "expected": {"max_elections": 0, "max_p99_latency_ms": 50, "min_success_rate": 0.999}
+    },
+    {
+      "name": "sustained_write_flood",
+      "description": "Continuous max write pressure. Short election timeout means even brief heartbeat stalls cause elections.",
+      "duration": "3m",
+      "election_timeout_ms": 250,
+      "heartbeat_interval_ms": 50,
+      "phases": [
+        {"duration": "3m", "workers": 500, "qps": 50000, "value_size": 32768, "read_ratio": 0, "parallel_sims": 4}
+      ],
+      "network": {"latency": "1ms", "jitter": "0ms", "packet_loss": 0},
+      "expected": {"max_elections": 999, "max_p99_latency_ms": 9999, "min_success_rate": 0.0}
+    },
+    {
+      "name": "burst_recovery",
+      "description": "Alternating calm and burst phases. Tests whether the cluster can recover between bursts with a short election timeout.",
+      "duration": "3m",
+      "election_timeout_ms": 250,
+      "heartbeat_interval_ms": 50,
+      "phases": [
+        {"duration": "30s", "workers": 50,  "qps": 1000,  "value_size": 1024,  "read_ratio": 0.7, "parallel_sims": 1},
+        {"duration": "20s", "workers": 500, "qps": 50000, "value_size": 32768, "read_ratio": 0,   "parallel_sims": 4},
+        {"duration": "30s", "workers": 50,  "qps": 1000,  "value_size": 1024,  "read_ratio": 0.7, "parallel_sims": 1},
+        {"duration": "20s", "workers": 500, "qps": 50000, "value_size": 32768, "read_ratio": 0,   "parallel_sims": 4},
+        {"duration": "40s", "workers": 50,  "qps": 1000,  "value_size": 1024,  "read_ratio": 0.7, "parallel_sims": 1}
+      ],
+      "network": {"latency": "5ms", "jitter": "2ms", "packet_loss": 0},
+      "expected": {"max_elections": 999, "max_p99_latency_ms": 9999, "min_success_rate": 0.0}
+    },
+    {
+      "name": "wan_simulation",
+      "description": "Cross-region latency with packet loss. RTT ~130ms worst-case, so election_timeout=700ms gives 5x RTT headroom while keeping heartbeat sensitive to write-induced queuing.",
+      "duration": "3m",
+      "election_timeout_ms": 700,
+      "heartbeat_interval_ms": 130,
+      "phases": [
+        {"duration": "30s",  "workers": 50,  "qps": 500,   "value_size": 1024,  "read_ratio": 0.5, "parallel_sims": 1},
+        {"duration": "120s", "workers": 200, "qps": 10000, "value_size": 8192,  "read_ratio": 0.1, "parallel_sims": 3},
+        {"duration": "30s",  "workers": 50,  "qps": 500,   "value_size": 1024,  "read_ratio": 0.5, "parallel_sims": 1}
+      ],
+      "network": {"latency": "50ms", "jitter": "15ms", "packet_loss": 0.5},
+      "expected": {"max_elections": 999, "max_p99_latency_ms": 9999, "min_success_rate": 0.0}
+    },
+    {
+      "name": "gradual_rampup",
+      "description": "Load increases every minute. Identifies the inflection point where application pressure starts causing elections.",
+      "duration": "5m",
+      "election_timeout_ms": 250,
+      "heartbeat_interval_ms": 50,
+      "phases": [
+        {"duration": "60s", "workers": 50,  "qps": 1000,  "value_size": 8192, "read_ratio": 0.5, "parallel_sims": 1},
+        {"duration": "60s", "workers": 100, "qps": 5000,  "value_size": 8192, "read_ratio": 0.5, "parallel_sims": 2},
+        {"duration": "60s", "workers": 200, "qps": 15000, "value_size": 8192, "read_ratio": 0.2, "parallel_sims": 3},
+        {"duration": "60s", "workers": 400, "qps": 30000, "value_size": 8192, "read_ratio": 0.1, "parallel_sims": 4},
+        {"duration": "60s", "workers": 500, "qps": 50000, "value_size": 8192, "read_ratio": 0.0, "parallel_sims": 5}
+      ],
+      "network": {"latency": "2ms", "jitter": "1ms", "packet_loss": 0},
+      "expected": {"max_elections": 999, "max_p99_latency_ms": 9999, "min_success_rate": 0.0}
+    },
+    {
+      "name": "competing_traffic",
+      "description": "High QPS mixed workload with network jitter simulating shared infrastructure.",
+      "duration": "3m",
+      "election_timeout_ms": 250,
+      "heartbeat_interval_ms": 50,
+      "phases": [
+        {"duration": "3m", "workers": 300, "qps": 20000, "value_size": 8192, "read_ratio": 0.3, "parallel_sims": 3}
+      ],
+      "network": {"latency": "5ms", "jitter": "5ms", "packet_loss": 0.1},
+      "expected": {"max_elections": 999, "max_p99_latency_ms": 9999, "min_success_rate": 0.0}
+    },
+    {
+      "name": "cross_datacenter",
+      "description": "Realistic cross-DC scenario (us-east / us-west, ~180ms RTT). heartbeat_interval=150ms means every AppendEntries delays the next heartbeat. election_timeout=1000ms (5.5x RTT) lets elections complete.",
+      "duration": "5m",
+      "election_timeout_ms": 1000,
+      "heartbeat_interval_ms": 150,
+      "phases": [
+        {"duration": "60s",  "workers": 20,  "qps": 200,   "value_size": 512,   "read_ratio": 0.7, "parallel_sims": 1},
+        {"duration": "120s", "workers": 200, "qps": 10000, "value_size": 16384, "read_ratio": 0.1, "parallel_sims": 3},
+        {"duration": "60s",  "workers": 400, "qps": 30000, "value_size": 32768, "read_ratio": 0.0, "parallel_sims": 5},
+        {"duration": "60s",  "workers": 20,  "qps": 200,   "value_size": 512,   "read_ratio": 0.7, "parallel_sims": 1}
+      ],
+      "network": {"latency": "80ms", "jitter": "10ms", "packet_loss": 0.5},
+      "expected": {"max_elections": 999, "max_p99_latency_ms": 9999, "min_success_rate": 0.0}
+    },
+    {
+      "name": "short_timeout_spike",
+      "description": "Minimum viable election timeout (5x heartbeat) under max write pressure. Any single delayed heartbeat fires an election.",
+      "duration": "3m",
+      "election_timeout_ms": 150,
+      "heartbeat_interval_ms": 20,
+      "phases": [
+        {"duration": "30s", "workers": 50,  "qps": 1000,  "value_size": 256,   "read_ratio": 0.5, "parallel_sims": 1},
+        {"duration": "90s", "workers": 500, "qps": 50000, "value_size": 32768, "read_ratio": 0.0, "parallel_sims": 5},
+        {"duration": "60s", "workers": 50,  "qps": 1000,  "value_size": 256,   "read_ratio": 0.5, "parallel_sims": 1}
+      ],
+      "network": {"latency": "1ms", "jitter": "0ms", "packet_loss": 0},
+      "expected": {"max_elections": 999, "max_p99_latency_ms": 9999, "min_success_rate": 0.0}
+    },
+    {
+      "name": "network_saturated",
+      "description": "300ms loopback latency (150ms one-way+jitter). Each AppendEntries RTT ~400ms. heartbeat_interval=300ms means every write-induced AppendEntries delays the heartbeat. election_timeout=1700ms (4x RTT) lets elections complete.",
+      "duration": "4m",
+      "election_timeout_ms": 1700,
+      "heartbeat_interval_ms": 300,
+      "phases": [
+        {"duration": "30s",  "workers": 50,  "qps": 500,   "value_size": 1024,  "read_ratio": 0.5, "parallel_sims": 1},
+        {"duration": "120s", "workers": 300, "qps": 30000, "value_size": 16384, "read_ratio": 0.0, "parallel_sims": 4},
+        {"duration": "60s",  "workers": 50,  "qps": 500,   "value_size": 1024,  "read_ratio": 0.5, "parallel_sims": 1}
+      ],
+      "network": {"latency": "150ms", "jitter": "50ms", "packet_loss": 0},
+      "expected": {"max_elections": 999, "max_p99_latency_ms": 9999, "min_success_rate": 0.0}
+    },
+    {
+      "name": "parallel_write_bomb",
+      "description": "5 simulators writing 64KB values simultaneously. Saturates the WAL and bbolt pipeline — disk I/O becomes the bottleneck that stalls heartbeats.",
+      "duration": "4m",
+      "election_timeout_ms": 200,
+      "heartbeat_interval_ms": 30,
+      "phases": [
+        {"duration": "30s",  "workers": 50,  "qps": 1000,  "value_size": 256,   "read_ratio": 0.5, "parallel_sims": 1},
+        {"duration": "120s", "workers": 500, "qps": 50000, "value_size": 65536, "read_ratio": 0.0, "parallel_sims": 5},
+        {"duration": "90s",  "workers": 50,  "qps": 1000,  "value_size": 256,   "read_ratio": 0.5, "parallel_sims": 1}
+      ],
+      "network": {"latency": "2ms", "jitter": "1ms", "packet_loss": 0},
+      "expected": {"max_elections": 999, "max_p99_latency_ms": 9999, "min_success_rate": 0.0}
+    },
+    {
+      "name": "chaos_network",
+      "description": "30% packet loss + 100ms latency. RTT ~300ms + retransmissions. heartbeat_interval=250ms means random packet drops directly kill heartbeats. election_timeout=2000ms lets elections complete despite retries.",
+      "duration": "4m",
+      "election_timeout_ms": 2000,
+      "heartbeat_interval_ms": 250,
+      "phases": [
+        {"duration": "30s",  "workers": 20,  "qps": 200,   "value_size": 512,   "read_ratio": 0.5, "parallel_sims": 1},
+        {"duration": "120s", "workers": 200, "qps": 10000, "value_size": 8192,  "read_ratio": 0.1, "parallel_sims": 3},
+        {"duration": "30s",  "workers": 20,  "qps": 200,   "value_size": 512,   "read_ratio": 0.5, "parallel_sims": 1}
+      ],
+      "network": {"latency": "100ms", "jitter": "50ms", "packet_loss": 30},
+      "expected": {"max_elections": 999, "max_p99_latency_ms": 9999, "min_success_rate": 0.0}
+    },
+    {
+      "name": "mega_value_flood",
+      "description": "EXTREME: 512KB values (huge-value profile) from 8 parallel simulators. WAL fsync and bbolt commit become multi-hundred-ms operations, starving heartbeats of the raft goroutine.",
+      "duration": "4m",
+      "election_timeout_ms": 200,
+      "heartbeat_interval_ms": 30,
+      "phases": [
+        {"duration": "30s",  "workers": 20,  "qps": 50,   "value_size": 512,    "read_ratio": 0.5, "parallel_sims": 1},
+        {"duration": "120s", "workers": 200, "qps": 5000, "value_size": 524288, "read_ratio": 0.0, "parallel_sims": 8},
+        {"duration": "30s",  "workers": 20,  "qps": 50,   "value_size": 512,    "read_ratio": 0.5, "parallel_sims": 1}
+      ],
+      "network": {"latency": "1ms", "jitter": "0ms", "packet_loss": 0},
+      "expected": {"max_elections": 999, "max_p99_latency_ms": 9999, "min_success_rate": 0.0}
+    },
+    {
+      "name": "leader_kill",
+      "description": "Directly kills the leader process to force guaranteed elections. Measures election recovery latency and post-election throughput/latency penalty. Clean baseline for election cost independent of what triggered it.",
+      "duration": "6m",
+      "election_timeout_ms": 500,
+      "heartbeat_interval_ms": 100,
+      "phases": [
+        {"duration": "60s", "workers": 50, "qps": 1000, "value_size": 256, "read_ratio": 0.5, "parallel_sims": 1},
+        {"type": "leader_kill", "duration": "30s", "kill_delay_s": 5, "restart_after_s": 10},
+        {"duration": "60s", "workers": 200, "qps": 5000, "value_size": 1024, "read_ratio": 0.3, "parallel_sims": 2},
+        {"type": "leader_kill", "duration": "30s", "kill_delay_s": 5, "restart_after_s": 10},
+        {"duration": "60s", "workers": 200, "qps": 5000, "value_size": 1024, "read_ratio": 0.3, "parallel_sims": 2},
+        {"type": "leader_kill", "duration": "30s", "kill_delay_s": 5, "restart_after_s": 10},
+        {"duration": "60s", "workers": 50, "qps": 1000, "value_size": 256, "read_ratio": 0.5, "parallel_sims": 1}
+      ],
+      "network": {"latency": "1ms", "jitter": "0ms", "packet_loss": 0},
+      "expected": {"max_elections": 999, "max_p99_latency_ms": 9999, "min_success_rate": 0.0}
+    },
+    {
+      "name": "transatlantic",
+      "description": "Realistic transatlantic link (NYC→London, ~280ms RTT with jitter). heartbeat_interval=250ms barely covers one-way latency. election_timeout=1300ms (4.6x RTT) allows elections to complete. Write pressure queues AppendEntries and misses heartbeat window.",
+      "duration": "5m",
+      "election_timeout_ms": 1300,
+      "heartbeat_interval_ms": 250,
+      "phases": [
+        {"duration": "60s",  "workers": 20,  "qps": 200,   "value_size": 512,   "read_ratio": 0.7, "parallel_sims": 1},
+        {"duration": "120s", "workers": 150, "qps": 8000,  "value_size": 8192,  "read_ratio": 0.1, "parallel_sims": 3},
+        {"duration": "60s",  "workers": 300, "qps": 20000, "value_size": 32768, "read_ratio": 0.0, "parallel_sims": 4},
+        {"duration": "60s",  "workers": 20,  "qps": 200,   "value_size": 512,   "read_ratio": 0.7, "parallel_sims": 1}
+      ],
+      "network": {"latency": "120ms", "jitter": "20ms", "packet_loss": 1},
+      "expected": {"max_elections": 999, "max_p99_latency_ms": 9999, "min_success_rate": 0.0}
+    }
+  ]
+}

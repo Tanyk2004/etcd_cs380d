@@ -1,0 +1,18 @@
+{
+  "total": 1,
+  "passed": 1,
+  "failed": 1,
+  "scenarios": [
+    {
+      "scenario": "network_saturated",
+      "elections": 0,
+      "elections_pass": true,
+      "p99_latency_ms": 0.0,
+      "latency_pass": true,
+      "success_rate": 0.9999140985718887,
+      "success_pass": true,
+      "max_pending_proposals": 162,
+      "total_failures": 4
+    }
+  ]
+}

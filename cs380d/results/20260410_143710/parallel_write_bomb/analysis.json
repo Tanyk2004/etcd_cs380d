@@ -1,0 +1,11 @@
+{
+  "scenario": "parallel_write_bomb",
+  "elections": 0,
+  "elections_pass": true,
+  "p99_latency_ms": 0.0,
+  "latency_pass": true,
+  "success_rate": 1.0,
+  "success_pass": true,
+  "max_pending_proposals": 750,
+  "total_failures": 0
+}

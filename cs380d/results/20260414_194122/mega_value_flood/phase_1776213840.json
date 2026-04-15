@@ -1,0 +1,7 @@
+{
+  "profile": "write-heavy",
+  "parallel_sims": 8,
+  "total_operations": 1929537,
+  "successful_operations": 1929537,
+  "latencies_ms": []
+}

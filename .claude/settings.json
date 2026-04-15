@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(chmod +x /home/tanay/cs380d/etcd_cs380d/cs380d/scripts/parse_tester_stats.py)",
+      "Bash(curl -s localhost:2379/metrics)",
+      "Bash(cargo build:*)",
+      "Bash(./target/release/traffic-sim --help)",
+      "Bash(./target/release/traffic-sim --list-profiles)"
+    ]
+  }
+}

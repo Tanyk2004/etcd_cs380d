@@ -1,0 +1,7 @@
+{
+  "profile": "spike",
+  "parallel_sims": 3,
+  "total_operations": 37892,
+  "successful_operations": 37892,
+  "latencies_ms": []
+}
