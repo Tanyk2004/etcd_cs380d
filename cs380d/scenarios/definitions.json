@@ -103,13 +103,13 @@
       "description": "Minimum viable election timeout (5x heartbeat) under max write pressure. Any single delayed heartbeat fires an election.",
       "duration": "3m",
       "election_timeout_ms": 150,
-      "heartbeat_interval_ms": 20,
+      "heartbeat_interval_ms": 30,
       "phases": [
         {"duration": "30s", "workers": 50,  "qps": 1000,  "value_size": 256,   "read_ratio": 0.5, "parallel_sims": 1},
         {"duration": "90s", "workers": 500, "qps": 50000, "value_size": 32768, "read_ratio": 0.0, "parallel_sims": 5},
         {"duration": "60s", "workers": 50,  "qps": 1000,  "value_size": 256,   "read_ratio": 0.5, "parallel_sims": 1}
       ],
-      "network": {"latency": "1ms", "jitter": "0ms", "packet_loss": 0},
+      "network": {"latency": "70ms", "jitter": "0ms", "packet_loss": 0},
       "expected": {"max_elections": 999, "max_p99_latency_ms": 9999, "min_success_rate": 0.0}
     },
     {
@@ -199,6 +199,48 @@
         {"duration": "60s",  "workers": 20,  "qps": 200,   "value_size": 512,   "read_ratio": 0.7, "parallel_sims": 1}
       ],
       "network": {"latency": "120ms", "jitter": "20ms", "packet_loss": 1},
+      "expected": {"max_elections": 999, "max_p99_latency_ms": 9999, "min_success_rate": 0.0}
+    },
+    {
+      "name": "nic_contention",
+      "description": "noise-client → 3 noise-nodes (peer UDP replication fills a 100Mbit/s tc-tbf cap). Noise-nodes write metadata to etcd every 5000 ops — only ~9 etcd writes/s total at 15000 QPS. AppendEntries are rare so the election timer can expire. election_timeout=150ms < tbf_latency=200ms so heartbeat TCP segments that hit the full tbf queue arrive too late and elections fire. The workload tester never touches etcd directly.",
+      "duration": "5m",
+      "election_timeout_ms": 150,
+      "heartbeat_interval_ms": 30,
+      "use_noise_client": true,
+      "noise_batch_size": 9000,
+      "noise_pkt_size": 8192,
+      "noise_workers": 50,
+      "phases": [
+        {"duration": "60s",  "qps": 1000,  "payload_size": 1024,  "parallel_sims": 1},
+        {"duration": "180s", "qps": 25000, "payload_size": 4096,  "parallel_sims": 3},
+        {"duration": "60s",  "qps": 1000,  "payload_size": 1024,  "parallel_sims": 1}
+      ],
+      "network": {
+        "latency": "50ms", "jitter": "1ms", "packet_loss": 0,
+        "bw_limit_mbit": 100 
+      },
+      "expected": {"max_elections": 999, "max_p99_latency_ms": 9999, "min_success_rate": 0.0}
+    },
+    {
+      "name": "noisy_neighbor_elections",
+      "description": "noise-client → 3 noise-nodes under a 500Mbit/s cap. Each write fans out to 2 peers via UDP: 5000 QPS × 8KB pkt × 2 peers = 640Mbit/s → saturates the 500Mbit cap. Metadata batch=9000 means only ~1.7 etcd writes/s total. election_timeout=150ms < tbf_latency=200ms → elections. Realistic 'noisy neighbor' in shared infra.",
+      "duration": "6m",
+      "election_timeout_ms": 150,
+      "heartbeat_interval_ms": 30,
+      "use_noise_client": true,
+      "noise_batch_size": 9000,
+      "noise_pkt_size": 8192,
+      "noise_workers": 50,
+      "phases": [
+        {"duration": "60s",  "qps": 200,  "payload_size": 1024, "parallel_sims": 1},
+        {"duration": "240s", "qps": 5000, "payload_size": 8192, "parallel_sims": 3},
+        {"duration": "60s",  "qps": 200,  "payload_size": 1024, "parallel_sims": 1}
+      ],
+      "network": {
+        "latency": "20ms", "jitter": "0ms", "packet_loss": 0,
+        "bw_limit_mbit": 500
+      },
       "expected": {"max_elections": 999, "max_p99_latency_ms": 9999, "min_success_rate": 0.0}
     }
   ]

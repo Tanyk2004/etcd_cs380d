@@ -1,5 +1,7 @@
 {
-  "annotations": { "list": [] },
+  "annotations": {
+    "list": []
+  },
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -9,7 +11,12 @@
       "title": "Leader Status",
       "description": "Shows which node is the leader (1) and whether a leader exists",
       "type": "timeseries",
-      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 0 },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
       "id": 1,
       "targets": [
         {
@@ -23,8 +30,14 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true },
-          "min": 0, "max": 1.1
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "spanNulls": true
+          },
+          "min": 0,
+          "max": 1.1
         }
       }
     },
@@ -32,7 +45,12 @@
       "title": "Leader Elections (cumulative)",
       "description": "Total leader changes seen - spikes indicate elections triggered by heartbeat timeouts",
       "type": "timeseries",
-      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 0 },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
       "id": 2,
       "targets": [
         {
@@ -42,27 +60,65 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "custom": { "drawStyle": "bars", "lineWidth": 1, "fillOpacity": 50 },
-          "color": { "mode": "fixed", "fixedColor": "red" }
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 1,
+            "fillOpacity": 50
+          },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "red"
+          }
         }
       }
     },
     {
-      "title": "Heartbeat Send Failures (rate)",
-      "description": "Rate of heartbeat send failures from the leader - indicates leader is overloaded",
+      "title": "Raft Peer RTT (p99 per peer)",
+      "description": "p99 round-trip time for Raft peer RPCs (AppendEntries + heartbeats). Under NIC saturation the tbf queue delays these. RTT > heartbeat_interval (30ms) \u2192 heartbeats miss their window. RTT > election_timeout (150ms) \u2192 election fires. This is the network-visible signal that heartbeat_send_failures cannot show.",
       "type": "timeseries",
-      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 6 },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      },
       "id": 3,
       "targets": [
         {
-          "expr": "rate(etcd_server_heartbeat_send_failures_total[30s])",
-          "legendFormat": "{{instance}} hb_failures/s"
+          "expr": "histogram_quantile(0.99, rate(etcd_network_peer_round_trip_time_seconds_bucket[10s]))",
+          "legendFormat": "{{instance}} \u2192 {{To}} p99"
+        },
+        {
+          "expr": "histogram_quantile(0.50, rate(etcd_network_peer_round_trip_time_seconds_bucket[10s]))",
+          "legendFormat": "{{instance}} \u2192 {{To}} p50"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 20 },
-          "color": { "mode": "fixed", "fixedColor": "orange" }
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "spanNulls": true
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.03
+              },
+              {
+                "color": "red",
+                "value": 0.15
+              }
+            ]
+          }
         }
       }
     },
@@ -70,7 +126,12 @@
       "title": "Dropped Messages by Type (send, rate)",
       "description": "Rate of dropped outgoing Raft messages broken down by message type. Look for MsgHeartbeat and MsgHeartbeatResp drops.",
       "type": "timeseries",
-      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 6 },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
       "id": 4,
       "targets": [
         {
@@ -80,7 +141,11 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 20 }
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 20
+          }
         }
       }
     },
@@ -88,7 +153,12 @@
       "title": "Dropped Messages by Type (recv, rate)",
       "description": "Rate of dropped incoming Raft messages broken down by message type.",
       "type": "timeseries",
-      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 12 },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
       "id": 5,
       "targets": [
         {
@@ -98,7 +168,11 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 20 }
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 20
+          }
         }
       }
     },
@@ -106,7 +180,12 @@
       "title": "Network Send Failures (rate)",
       "description": "Rate of all network send failures to peers - general congestion indicator",
       "type": "timeseries",
-      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 12 },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
       "id": 6,
       "targets": [
         {
@@ -116,8 +195,15 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 20 },
-          "color": { "mode": "fixed", "fixedColor": "yellow" }
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 20
+          },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "yellow"
+          }
         }
       }
     },
@@ -125,7 +211,12 @@
       "title": "Peer Round-Trip Time (p99)",
       "description": "99th percentile RTT between peers - shows network latency increasing under congestion",
       "type": "timeseries",
-      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 18 },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 18
+      },
       "id": 7,
       "targets": [
         {
@@ -135,7 +226,11 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10 },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
           "unit": "s"
         }
       }
@@ -144,7 +239,12 @@
       "title": "Proposals Pending",
       "description": "Current number of pending proposals - high values indicate backpressure from congestion",
       "type": "timeseries",
-      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 18 },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 18
+      },
       "id": 8,
       "targets": [
         {
@@ -154,7 +254,11 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 20 }
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 20
+          }
         }
       }
     },
@@ -162,7 +266,12 @@
       "title": "Proposals Failed (rate)",
       "description": "Rate of failed proposals - correlates with leader instability from heartbeat drops",
       "type": "timeseries",
-      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 24 },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
       "id": 9,
       "targets": [
         {
@@ -172,8 +281,15 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 20 },
-          "color": { "mode": "fixed", "fixedColor": "red" }
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 20
+          },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "red"
+          }
         }
       }
     },
@@ -181,7 +297,12 @@
       "title": "gRPC Request Rate",
       "description": "Rate of incoming gRPC requests - shows the traffic load causing congestion",
       "type": "timeseries",
-      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 24 },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
       "id": 10,
       "targets": [
         {
@@ -191,7 +312,11 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10 }
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
         }
       }
     },
@@ -199,7 +324,12 @@
       "title": "Correlation: Heartbeat Drops vs Leader Elections",
       "description": "Overlay of heartbeat-related drops and leader elections to show causation",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 30 },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 30
+      },
       "id": 11,
       "targets": [
         {
@@ -221,16 +351,200 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true }
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "spanNulls": true
+          }
         }
+      }
+    },
+    {
+      "title": "NIC Queue Saturation (tc backlog)",
+      "description": "Instantaneous tbf queue depth. Capacity = rate \u00d7 latency = 100Mbit \u00d7 200ms = 2.5MB. When backlog approaches capacity, new packets are dropped.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 36
+      },
+      "id": 12,
+      "targets": [
+        {
+          "expr": "tc_qdisc_backlog_bytes{type=\"tbf\"}",
+          "legendFormat": "backlog bytes (tbf)"
+        },
+        {
+          "expr": "tc_qdisc_backlog_packets{type=\"tbf\"} * 1500",
+          "legendFormat": "backlog pkts \u00d7 1500 (bytes equiv)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "spanNulls": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "backlog bytes (tbf)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "noValue": "0"
+      }
+    },
+    {
+      "title": "NIC Throttle & Drop Rate (tc)",
+      "description": "overlimits/s = packets hitting rate limit (queued). drops/s = queue overflow (these cause TCP retransmit \u2192 election). Non-zero drops with election_timeout < TCP RTO will trigger elections.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 36
+      },
+      "id": 13,
+      "targets": [
+        {
+          "expr": "rate(tc_qdisc_overlimits_total{type=\"tbf\"}[5s])",
+          "legendFormat": "overlimits/s (queued at cap)"
+        },
+        {
+          "expr": "rate(tc_qdisc_drops_total{type=\"tbf\"}[5s])",
+          "legendFormat": "drops/s (queue overflow \u2192 retransmit)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "spanNulls": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "drops/s (queue overflow \u2192 retransmit)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "overlimits/s (queued at cap)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "noValue": "0"
+      }
+    },
+    {
+      "title": "Noise App Throughput vs etcd Proposals",
+      "description": "Compares noise-node application ops/s (from /health) against etcd committed proposals/s. The gap shows how much load bypasses Raft. High noise throughput with low proposals = AppendEntries are rare = election timer can expire.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 42
+      },
+      "id": 14,
+      "targets": [
+        {
+          "expr": "sum(rate(etcd_server_proposals_committed_total[5s]))",
+          "legendFormat": "etcd proposals/s (AppendEntries triggers)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "spanNulls": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "etcd proposals/s (AppendEntries triggers)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "noValue": "0"
       }
     }
   ],
   "refresh": "2s",
   "schemaVersion": 39,
-  "tags": ["etcd", "raft", "observability"],
-  "templating": { "list": [] },
-  "time": { "from": "now-5m", "to": "now" },
+  "tags": [
+    "etcd",
+    "raft",
+    "observability"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-5m",
+    "to": "now"
+  },
   "timepicker": {},
   "timezone": "",
   "title": "etcd Raft Observability",

@@ -8,13 +8,152 @@ mkdir -p "$RESULTS_DIR"
 
 # If run via sudo, fix ownership of results so the real user can read them
 REAL_USER="${SUDO_USER:-$USER}"
-fix_ownership() { chown -R "$REAL_USER:" "$RESULTS_DIR" 2>/dev/null || true; }
-trap fix_ownership EXIT
+NOISE_PID=""
+TC_EXPORTER_PID=""
+cleanup() {
+    [[ -n "$NOISE_PID" ]]        && kill "$NOISE_PID"        2>/dev/null || true
+    [[ -n "$TC_EXPORTER_PID" ]]  && kill "$TC_EXPORTER_PID"  2>/dev/null || true
+    stop_noise_nodes 2>/dev/null || true
+    chown -R "$REAL_USER:" "$RESULTS_DIR" 2>/dev/null || true
+}
+trap cleanup EXIT
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BIN_DIR="$SCRIPT_DIR/../bin"
+
 TRAFFIC_SIM="$REPO_ROOT/etcd-workload-tester/target/release/traffic-sim"
+NOISE_NODE="$BIN_DIR/noise-node"
+NOISE_CLIENT="$BIN_DIR/noise-client"
+TC_EXPORTER="$BIN_DIR/tc-exporter"
+ETCDCTL="$REPO_ROOT/bin/etcdctl"
 ETCD_ENDPOINTS="http://127.0.0.1:2379,http://127.0.0.1:22379,http://127.0.0.1:32379"
 SCENARIOS_FILE="./scenarios/definitions.json"
+
+NOISE_NODE_PIDS=()  # PIDs of the 3 noise-node instances for the current scenario
+
+# Build noise binaries if missing or stale
+NOISE_SRC="$SCRIPT_DIR/../tools/network-noise"
+_build_noise() {
+    local src_ts
+    src_ts=$(find "$NOISE_SRC" -name '*.go' -newer "$NOISE_NODE" 2>/dev/null | head -1)
+    if [[ ! -x "$NOISE_NODE" || -n "$src_ts" ]]; then
+        echo "Building noise-node..."
+        GOWORK=off go build -C "$NOISE_SRC" -o "$BIN_DIR/noise-node"   ./cmd/node   2>&1 || \
+            { echo "WARNING: noise-node build failed"; return 1; }
+        GOWORK=off go build -C "$NOISE_SRC" -o "$BIN_DIR/noise-client" ./cmd/client 2>&1 || \
+            { echo "WARNING: noise-client build failed"; return 1; }
+        echo "Noise binaries built."
+    fi
+}
+mkdir -p "$BIN_DIR"
+_build_noise || true
+
+# Start tc-exporter so Prometheus (and Grafana) can see qdisc saturation metrics.
+# Safe to run even when no tbf cap is active — all values are just 0.
+# Idempotent: skip if already serving on :9105.
+TC_EXPORTER_PID=""
+if curl -sf --max-time 1 localhost:9105/metrics >/dev/null 2>&1; then
+    echo "tc-exporter already running on :9105"
+elif GOWORK=off go build -C "$NOISE_SRC" -o "$BIN_DIR/tc-exporter" ./cmd/tc-exporter 2>/dev/null; then
+    "$TC_EXPORTER" -iface lo -port :9105 > /tmp/tc-exporter.log 2>&1 &
+    TC_EXPORTER_PID=$!
+    echo "tc-exporter started (pid $TC_EXPORTER_PID) → :9105"
+else
+    echo "WARNING: tc-exporter build failed; tc metrics will not appear in Grafana"
+fi
+
+# ── Noise-node cluster management ────────────────────────────────────────────
+# Starts 3 noise-node instances on localhost (one per "application node").
+# Each pair is peers for UDP replication.
+start_noise_nodes() {
+    local batch=$1     # etcd write every N ops
+    local pkt_size=${2:-1400}  # UDP replication packet size in bytes
+
+    if [[ ! -x "$NOISE_NODE" ]]; then
+        echo "ERROR: noise-node binary not found; skipping" >&2
+        return 1
+    fi
+
+    echo "Starting 3 noise-node instances (batch=${batch} pkt=${pkt_size}B)..."
+    # node1: HTTP :19001, UDP repl :18001, peers → 18002,18003
+    "$NOISE_NODE" \
+        -id node1 -listen :19001 -repl :18001 \
+        -peers 127.0.0.1:18002,127.0.0.1:18003 \
+        -etcdctl "$ETCDCTL" -etcd "$ETCD_ENDPOINTS" \
+        -batch "$batch" -pkt "$pkt_size" >> "$SCENARIO_DIR/noise_node1.log" 2>&1 &
+    NOISE_NODE_PIDS+=($!)
+
+    "$NOISE_NODE" \
+        -id node2 -listen :19002 -repl :18002 \
+        -peers 127.0.0.1:18001,127.0.0.1:18003 \
+        -etcdctl "$ETCDCTL" -etcd "$ETCD_ENDPOINTS" \
+        -batch "$batch" -pkt "$pkt_size" >> "$SCENARIO_DIR/noise_node2.log" 2>&1 &
+    NOISE_NODE_PIDS+=($!)
+
+    "$NOISE_NODE" \
+        -id node3 -listen :19003 -repl :18003 \
+        -peers 127.0.0.1:18001,127.0.0.1:18002 \
+        -etcdctl "$ETCDCTL" -etcd "$ETCD_ENDPOINTS" \
+        -batch "$batch" -pkt "$pkt_size" >> "$SCENARIO_DIR/noise_node3.log" 2>&1 &
+    NOISE_NODE_PIDS+=($!)
+
+    # Wait for all 3 HTTP ports to be ready
+    for port in 19001 19002 19003; do
+        for _ in $(seq 1 20); do
+            curl -sf "http://127.0.0.1:$port/health" &>/dev/null && break
+            sleep 0.2
+        done
+    done
+    echo "Noise nodes ready (pids: ${NOISE_NODE_PIDS[*]})"
+}
+
+stop_noise_nodes() {
+    for pid in "${NOISE_NODE_PIDS[@]}"; do
+        kill "$pid" 2>/dev/null || true
+    done
+    NOISE_NODE_PIDS=()
+}
+
+# Run N parallel noise-client instances for a given duration.
+# All instances append to the same log file so parse_tester_stats.py sees
+# aggregated ops/s (lines share ts= timestamps and are summed per-second).
+run_parallel_noise_clients() {
+    local qps=$1
+    local size=$2
+    local duration=$3
+    local n=$4
+    local log_file=$5
+    local workers=${6:-50}
+    local pids=()
+
+    local nodes="http://127.0.0.1:19001,http://127.0.0.1:19002,http://127.0.0.1:19003"
+    # Per-instance QPS: divide evenly
+    local per_qps=$(( qps / n ))
+    [[ $per_qps -lt 1 ]] && per_qps=1
+
+    # Truncate log file once before all instances start so >> appends cleanly
+    [[ -n "$log_file" ]] && : > "$log_file"
+
+    for i in $(seq 1 "$n"); do
+        if [[ -n "$log_file" ]]; then
+            "$NOISE_CLIENT" \
+                -nodes "$nodes" -qps "$per_qps" -size "$size" \
+                -workers "$workers" -dur "$duration" \
+                -profile "noise-c${i}" \
+                >> "$log_file" 2>&1 &
+        else
+            "$NOISE_CLIENT" \
+                -nodes "$nodes" -qps "$per_qps" -size "$size" \
+                -workers "$workers" -dur "$duration" \
+                > /dev/null 2>&1 &
+        fi
+        pids+=($!)
+    done
+    for pid in "${pids[@]}"; do
+        wait "$pid" 2>/dev/null || true
+    done
+}
 
 # Optional: run a single scenario by name
 #   sudo bash scripts/run_test_suite.sh --scenario cross_datacenter
@@ -118,16 +257,22 @@ while IFS= read -r scenario; do
     mkdir -p "$SCENARIO_DIR"
 
     # Apply network conditions
-    latency=$(echo "$scenario" | jq -r '.network.latency')
-    jitter=$(echo "$scenario"  | jq -r '.network.jitter')
-    loss=$(echo "$scenario"    | jq -r '.network.packet_loss')
+    latency=$(echo "$scenario"  | jq -r '.network.latency')
+    jitter=$(echo "$scenario"   | jq -r '.network.jitter')
+    loss=$(echo "$scenario"     | jq -r '.network.packet_loss')
+    bw_limit=$(echo "$scenario" | jq -r '.network.bw_limit_mbit // 0')
+    noise_bw=$(echo "$scenario" | jq -r '.network.noise_bw_mbit // 0')
 
-    echo "Applying network conditions: latency=$latency jitter=$jitter loss=$loss"
-    ./scripts/apply_network.sh "$latency" "$jitter" "$loss"
+    echo "Applying network conditions: latency=$latency jitter=$jitter loss=$loss bw_limit=${bw_limit}mbit noise=${noise_bw}mbit"
+    ./scripts/apply_network.sh "$latency" "$jitter" "$loss" lo "$bw_limit"
 
     # Read per-scenario etcd tuning (with defaults)
-    election_ms=$(echo "$scenario" | jq -r '.election_timeout_ms // 1000')
-    heartbeat_ms=$(echo "$scenario" | jq -r '.heartbeat_interval_ms // 100')
+    election_ms=$(echo "$scenario"   | jq -r '.election_timeout_ms // 1000')
+    heartbeat_ms=$(echo "$scenario"  | jq -r '.heartbeat_interval_ms // 100')
+    use_noise=$(echo "$scenario"      | jq -r '.use_noise_client // false')
+    noise_batch=$(echo "$scenario"   | jq -r '.noise_batch_size // 2000')
+    noise_pkt=$(echo "$scenario"     | jq -r '.noise_pkt_size // 1400')
+    noise_workers=$(echo "$scenario" | jq -r '.noise_workers // 50')
 
     echo "Resetting cluster (election_timeout=${election_ms}ms heartbeat=${heartbeat_ms}ms)..."
     ELECTION_TIMEOUT_MS="$election_ms" HEARTBEAT_INTERVAL_MS="$heartbeat_ms" \
@@ -136,6 +281,23 @@ while IFS= read -r scenario; do
 
     # Record initial metrics
     curl -s localhost:2379/metrics > "$SCENARIO_DIR/metrics_start.txt"
+
+    # ── Noise-node cluster: start before metrics so their etcd writes appear ──
+    # For use_noise_client=true scenarios: noise-nodes ARE the application.
+    # The workload tester (noise-client) talks to them, not to etcd directly.
+    # For use_noise_client=false scenarios with noise_bw set: pure UDP flood.
+    NOISE_PID=""
+    if [[ "$use_noise" == "true" ]]; then
+        stop_noise_nodes  # clean up any leftover from previous scenario
+        start_noise_nodes "$noise_batch" "$noise_pkt"
+    elif [[ "$noise_bw" != "0" && "$noise_bw" != "0.0" && -x "$BIN_DIR/network-noise" ]]; then
+        echo "Starting raw UDP noise at ${noise_bw} Mbit/s..."
+        "$BIN_DIR/network-noise" \
+            -listen 127.0.0.1:19998 -target 127.0.0.1:19998 \
+            -bw "$noise_bw" >> "$SCENARIO_DIR/noise.log" 2>&1 &
+        NOISE_PID=$!
+        sleep 0.5
+    fi
 
     # Start metrics collection in background
     ./scripts/collect_metrics.sh "$SCENARIO_DIR" &
@@ -221,14 +383,22 @@ while IFS= read -r scenario; do
         fi
 
         # ── Normal workload phase ─────────────────────────────────────────────
-        profile=$(map_to_profile "$qps" "$read_ratio" "$value_size")
-        echo "Phase $phase_num: profile=$profile x${parallel} (qps=$qps read_ratio=$read_ratio value_size=$value_size) duration=$duration"
-
         committed_before=$(scrape_metric 'etcd_server_proposals_committed_total')
         failed_before=$(scrape_metric 'etcd_server_proposals_failed_total')
 
         tester_log="$SCENARIO_DIR/tester_phase${phase_num}.log"
-        run_parallel_sims "$profile" "$duration" "$parallel" "$tester_log"
+
+        if [[ "$use_noise" == "true" ]]; then
+            # ── noise-client path: requests go to noise-nodes, NOT etcd ──────
+            payload_size=$(echo "$phase" | jq -r '.payload_size // .value_size // 4096')
+            echo "Phase $phase_num [noise-client] x${parallel} qps=${qps} size=${payload_size}B duration=${duration}"
+            run_parallel_noise_clients "$qps" "$payload_size" "$duration" "$parallel" "$tester_log" "$noise_workers"
+        else
+            # ── traffic-sim path: direct etcd writes ──────────────────────────
+            profile=$(map_to_profile "$qps" "$read_ratio" "$value_size")
+            echo "Phase $phase_num: profile=$profile x${parallel} (qps=$qps read_ratio=$read_ratio value_size=$value_size) duration=$duration"
+            run_parallel_sims "$profile" "$duration" "$parallel" "$tester_log"
+        fi
 
         committed_after=$(scrape_metric 'etcd_server_proposals_committed_total')
         failed_after=$(scrape_metric 'etcd_server_proposals_failed_total')
@@ -237,14 +407,15 @@ while IFS= read -r scenario; do
         failed=$(( failed_after - failed_before ))
         successful=$(( total - failed ))
 
-        # Parse traffic-sim stats log into ops_stats CSV for throughput plots
+        # Parse stats log into ops CSV for throughput plots
         PYTHON="${VENV_PYTHON:-/home/tanay/cs380d/venv/bin/python3}"
         "$PYTHON" "$(dirname "$0")/parse_tester_stats.py" \
             "$tester_log" "$SCENARIO_DIR/ops_phase${phase_num}.csv" 2>/dev/null || true
 
+        phase_profile=$([ "$use_noise" == "true" ] && echo "noise-client" || echo "$profile")
         cat > "$SCENARIO_DIR/phase_$(date +%s).json" <<EOF
 {
-  "profile": "$profile",
+  "profile": "${phase_profile}",
   "parallel_sims": $parallel,
   "total_operations": $total,
   "successful_operations": $successful,
@@ -253,8 +424,13 @@ while IFS= read -r scenario; do
 EOF
     done < <(echo "$scenario" | jq -c '.phases[]')
 
-    # Stop metrics collection
+    # Stop metrics collection, noise generator, and noise nodes
     kill $METRICS_PID 2>/dev/null || true
+    [[ -n "$NOISE_PID" ]] && kill $NOISE_PID 2>/dev/null || true
+    NOISE_PID=""
+    if [[ "$use_noise" == "true" ]]; then
+        stop_noise_nodes
+    fi
 
     # Record final metrics
     curl -s localhost:2379/metrics > "$SCENARIO_DIR/metrics_end.txt"

@@ -14,3 +14,15 @@ scrape_configs:
         labels:
           cluster: "test"
     metrics_path: /metrics
+
+  - job_name: "tc"
+    # tc-exporter: exposes tc qdisc stats for the loopback interface.
+    # Metrics: tc_qdisc_drops_total, tc_qdisc_overlimits_total,
+    #          tc_qdisc_backlog_bytes, tc_qdisc_backlog_packets
+    # Started by run_test_suite.sh; safe to scrape even when no tbf cap is active.
+    static_configs:
+      - targets:
+          - "127.0.0.1:9105"
+        labels:
+          cluster: "test"
+    metrics_path: /metrics
