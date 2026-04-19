@@ -10,9 +10,11 @@ mkdir -p "$RESULTS_DIR"
 REAL_USER="${SUDO_USER:-$USER}"
 NOISE_PID=""
 TC_EXPORTER_PID=""
+EBPF_CONTROLLER_PID=""
 cleanup() {
-    [[ -n "$NOISE_PID" ]]        && kill "$NOISE_PID"        2>/dev/null || true
-    [[ -n "$TC_EXPORTER_PID" ]]  && kill "$TC_EXPORTER_PID"  2>/dev/null || true
+    [[ -n "$NOISE_PID" ]]            && kill "$NOISE_PID"            2>/dev/null || true
+    [[ -n "$TC_EXPORTER_PID" ]]      && kill "$TC_EXPORTER_PID"      2>/dev/null || true
+    [[ -n "$EBPF_CONTROLLER_PID" ]]  && kill "$EBPF_CONTROLLER_PID"  2>/dev/null || true
     stop_noise_nodes 2>/dev/null || true
     chown -R "$REAL_USER:" "$RESULTS_DIR" 2>/dev/null || true
 }
@@ -27,6 +29,8 @@ NOISE_NODE="$BIN_DIR/noise-node"
 NOISE_CLIENT="$BIN_DIR/noise-client"
 TC_EXPORTER="$BIN_DIR/tc-exporter"
 ETCDCTL="$REPO_ROOT/bin/etcdctl"
+EBPF_CONTROLLER="$REPO_ROOT/ebpf-controller/ebpf-controller"
+EBPF_BPF_OBJ="$REPO_ROOT/bpf/tc_prio.bpf.o"
 ETCD_ENDPOINTS="http://127.0.0.1:2379,http://127.0.0.1:22379,http://127.0.0.1:32379"
 SCENARIOS_FILE="./scenarios/definitions.json"
 
@@ -61,6 +65,26 @@ elif GOWORK=off go build -C "$NOISE_SRC" -o "$BIN_DIR/tc-exporter" ./cmd/tc-expo
     echo "tc-exporter started (pid $TC_EXPORTER_PID) → :9105"
 else
     echo "WARNING: tc-exporter build failed; tc metrics will not appear in Grafana"
+fi
+
+# Start the ebpf-controller: loads bpf/tc_prio.bpf.o, attaches it to TC egress
+# on lo, and toggles heartbeat priority boosting when RTT or hb-failures rise.
+# Requires CAP_NET_ADMIN + CAP_BPF (run_test_suite.sh is already invoked via sudo).
+# --rtt-ms 20: boost kicks in when peer RTT exceeds 20ms, well before the
+#              30ms heartbeat interval is threatened.
+EBPF_CONTROLLER_PID=""
+if [[ -x "$EBPF_CONTROLLER" && -f "$EBPF_BPF_OBJ" ]]; then
+    "$EBPF_CONTROLLER" \
+        --iface lo \
+        --obj  "$EBPF_BPF_OBJ" \
+        --metrics "http://127.0.0.1:9101/metrics" \
+        --rtt-ms 20 \
+        >> /tmp/ebpf-controller.log 2>&1 &
+    EBPF_CONTROLLER_PID=$!
+    echo "ebpf-controller started (pid $EBPF_CONTROLLER_PID, log /tmp/ebpf-controller.log)"
+else
+    echo "WARNING: ebpf-controller or bpf/tc_prio.bpf.o not found — heartbeat priority boost disabled"
+    echo "  Build with: go build -o ebpf-controller/ebpf-controller ./ebpf-controller && make -C bpf"
 fi
 
 # ── Noise-node cluster management ────────────────────────────────────────────
@@ -374,6 +398,7 @@ while IFS= read -r scenario; do
                 --initial-cluster-state existing \
                 --election-timeout="${election_ms}" \
                 --heartbeat-interval="${heartbeat_ms}" \
+                --heartbeat-mark=0x1337 \
                 --max-request-bytes=10485760 \
                 --logger=zap --log-outputs=stderr \
                 >> "/tmp/etcd${killed_idx}.log" 2>&1 &
