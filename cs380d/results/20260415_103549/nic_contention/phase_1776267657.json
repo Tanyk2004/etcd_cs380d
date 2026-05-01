@@ -1,0 +1,7 @@
+{
+  "profile": "noise-clienttrue",
+  "parallel_sims": 1,
+  "total_operations": 52,
+  "successful_operations": 52,
+  "latencies_ms": []
+}

@@ -1,0 +1,7 @@
+{
+  "profile": "idle",
+  "parallel_sims": 1,
+  "total_operations": 80,
+  "successful_operations": 80,
+  "latencies_ms": []
+}

@@ -1,0 +1,19 @@
+# prometheus/alerts.yml
+groups:
+  - name: etcd_election_alerts
+    rules:
+      - alert: FrequentLeaderElections
+        expr: rate(etcd_server_leader_changes_seen_total[1m]) > 0.1
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Frequent leader elections detected"
+          
+      - alert: HeartbeatFailures
+        expr: rate(etcd_server_heartbeat_send_failures_total[1m]) > 0
+        for: 10s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Heartbeat send failures detected"

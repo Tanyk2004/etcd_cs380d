@@ -1,0 +1,7 @@
+{
+  "profile": "medium",
+  "parallel_sims": 1,
+  "total_operations": 500,
+  "successful_operations": 500,
+  "latencies_ms": []
+}

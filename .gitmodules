@@ -1,0 +1,3 @@
+[submodule "etcd-workload-tester"]
+	path = etcd-workload-tester
+	url = git@github.com:KshitijKapoor8/etcd-workload-tester.git

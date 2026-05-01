@@ -1,0 +1,11 @@
+{
+  "scenario": "nic_contention",
+  "elections": 7,
+  "elections_pass": true,
+  "p99_latency_ms": 0.0,
+  "latency_pass": true,
+  "success_rate": 0.6145833333333334,
+  "success_pass": true,
+  "max_pending_proposals": 1,
+  "total_failures": 37
+}

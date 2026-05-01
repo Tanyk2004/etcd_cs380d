@@ -1,0 +1,18 @@
+{
+  "total": 1,
+  "passed": 1,
+  "failed": 1,
+  "scenarios": [
+    {
+      "scenario": "nic_contention",
+      "elections": 0,
+      "elections_pass": true,
+      "p99_latency_ms": 0.0,
+      "latency_pass": true,
+      "success_rate": 1.0,
+      "success_pass": true,
+      "max_pending_proposals": 3,
+      "total_failures": 0
+    }
+  ]
+}

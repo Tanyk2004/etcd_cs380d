@@ -1,0 +1,7 @@
+{
+  "profile": "high",
+  "parallel_sims": 2,
+  "total_operations": 24040,
+  "successful_operations": 24040,
+  "latencies_ms": []
+}

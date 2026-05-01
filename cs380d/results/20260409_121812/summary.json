@@ -1,0 +1,73 @@
+{
+  "total": 6,
+  "passed": 6,
+  "failed": 6,
+  "scenarios": [
+    {
+      "scenario": "baseline_steady_state",
+      "elections": 0,
+      "elections_pass": true,
+      "p99_latency_ms": 0.0,
+      "latency_pass": true,
+      "success_rate": 1.0,
+      "success_pass": true,
+      "max_pending_proposals": 4,
+      "total_failures": 0
+    },
+    {
+      "scenario": "burst_recovery",
+      "elections": 0,
+      "elections_pass": true,
+      "p99_latency_ms": 0.0,
+      "latency_pass": true,
+      "success_rate": 1.0,
+      "success_pass": true,
+      "max_pending_proposals": 79,
+      "total_failures": 0
+    },
+    {
+      "scenario": "competing_traffic",
+      "elections": 0,
+      "elections_pass": true,
+      "p99_latency_ms": 0.0,
+      "latency_pass": true,
+      "success_rate": 1.0,
+      "success_pass": true,
+      "max_pending_proposals": 129,
+      "total_failures": 0
+    },
+    {
+      "scenario": "gradual_rampup",
+      "elections": 0,
+      "elections_pass": true,
+      "p99_latency_ms": 0.0,
+      "latency_pass": true,
+      "success_rate": 1.0,
+      "success_pass": true,
+      "max_pending_proposals": 155,
+      "total_failures": 0
+    },
+    {
+      "scenario": "sustained_write_flood",
+      "elections": 0,
+      "elections_pass": true,
+      "p99_latency_ms": 0.0,
+      "latency_pass": true,
+      "success_rate": 1.0,
+      "success_pass": true,
+      "max_pending_proposals": 49,
+      "total_failures": 0
+    },
+    {
+      "scenario": "wan_simulation",
+      "elections": 0,
+      "elections_pass": true,
+      "p99_latency_ms": 0.0,
+      "latency_pass": true,
+      "success_rate": 1.0,
+      "success_pass": true,
+      "max_pending_proposals": 13,
+      "total_failures": 0
+    }
+  ]
+}

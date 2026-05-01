@@ -1,0 +1,11 @@
+{
+  "scenario": "baseline_steady_state",
+  "elections": 0,
+  "elections_pass": true,
+  "p99_latency_ms": 0.0,
+  "latency_pass": true,
+  "success_rate": 1.0,
+  "success_pass": true,
+  "max_pending_proposals": 4,
+  "total_failures": 0
+}
