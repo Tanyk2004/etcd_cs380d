@@ -35,3 +35,8 @@ hack/tls-setup/certs
 /tools/benchmark/benchmark
 /out
 /etcd-dump-logs
+etcd-workload-tester/
+*.csv
+
+cs380d/results/
+cs380d/bin/
