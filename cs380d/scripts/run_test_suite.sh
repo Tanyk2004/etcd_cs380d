@@ -6,15 +6,39 @@ set -e
 RESULTS_DIR="./results/$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$RESULTS_DIR"
 
+# Parse flags first so USE_HEARTBEAT_MARK is set before any service is started.
+# Optional: run a single scenario by name
+#   sudo bash scripts/run_test_suite.sh --scenario cross_datacenter
+# Optional: disable heartbeat SO_MARK + eBPF priority boost
+#   sudo bash scripts/run_test_suite.sh --no-heartbeat-mark
+FILTER_SCENARIO=""
+export USE_HEARTBEAT_MARK=1
+_args=("$@")
+_i=0
+while [[ $_i -lt ${#_args[@]} ]]; do
+    case "${_args[$_i]}" in
+        --scenario)
+            _i=$(( _i + 1 ))
+            FILTER_SCENARIO="${_args[$_i]}"
+            ;;
+        --no-heartbeat-mark)
+            USE_HEARTBEAT_MARK=0
+            ;;
+    esac
+    _i=$(( _i + 1 ))
+done
+
 # If run via sudo, fix ownership of results so the real user can read them
 REAL_USER="${SUDO_USER:-$USER}"
 NOISE_PID=""
 TC_EXPORTER_PID=""
 EBPF_CONTROLLER_PID=""
+TC_STATS_PID=""
 cleanup() {
     [[ -n "$NOISE_PID" ]]            && kill "$NOISE_PID"            2>/dev/null || true
     [[ -n "$TC_EXPORTER_PID" ]]      && kill "$TC_EXPORTER_PID"      2>/dev/null || true
     [[ -n "$EBPF_CONTROLLER_PID" ]]  && kill "$EBPF_CONTROLLER_PID"  2>/dev/null || true
+    [[ -n "$TC_STATS_PID" ]]         && kill "$TC_STATS_PID"         2>/dev/null || true
     stop_noise_nodes 2>/dev/null || true
     chown -R "$REAL_USER:" "$RESULTS_DIR" 2>/dev/null || true
 }
@@ -39,13 +63,14 @@ NOISE_NODE_PIDS=()  # PIDs of the 3 noise-node instances for the current scenari
 # Build noise binaries if missing or stale
 NOISE_SRC="$SCRIPT_DIR/../tools/network-noise"
 _build_noise() {
-    local src_ts
+    local src_ts go_bin
+    go_bin=$(command -v go 2>/dev/null || echo "/usr/local/go/bin/go")
     src_ts=$(find "$NOISE_SRC" -name '*.go' -newer "$NOISE_NODE" 2>/dev/null | head -1)
     if [[ ! -x "$NOISE_NODE" || -n "$src_ts" ]]; then
         echo "Building noise-node..."
-        GOWORK=off go build -C "$NOISE_SRC" -o "$BIN_DIR/noise-node"   ./cmd/node   2>&1 || \
+        GOWORK=off "$go_bin" build -C "$NOISE_SRC" -o "$BIN_DIR/noise-node"   ./cmd/node   2>&1 || \
             { echo "WARNING: noise-node build failed"; return 1; }
-        GOWORK=off go build -C "$NOISE_SRC" -o "$BIN_DIR/noise-client" ./cmd/client 2>&1 || \
+        GOWORK=off "$go_bin" build -C "$NOISE_SRC" -o "$BIN_DIR/noise-client" ./cmd/client 2>&1 || \
             { echo "WARNING: noise-client build failed"; return 1; }
         echo "Noise binaries built."
     fi
@@ -59,7 +84,7 @@ _build_noise || true
 TC_EXPORTER_PID=""
 if curl -sf --max-time 1 localhost:9105/metrics >/dev/null 2>&1; then
     echo "tc-exporter already running on :9105"
-elif GOWORK=off go build -C "$NOISE_SRC" -o "$BIN_DIR/tc-exporter" ./cmd/tc-exporter 2>/dev/null; then
+elif GOWORK=off "$(command -v go 2>/dev/null || echo /usr/local/go/bin/go)" build -C "$NOISE_SRC" -o "$BIN_DIR/tc-exporter" ./cmd/tc-exporter 2>/dev/null; then
     "$TC_EXPORTER" -iface lo -port :9105 > /tmp/tc-exporter.log 2>&1 &
     TC_EXPORTER_PID=$!
     echo "tc-exporter started (pid $TC_EXPORTER_PID) → :9105"
@@ -73,12 +98,14 @@ fi
 # --rtt-ms 20: boost kicks in when peer RTT exceeds 20ms, well before the
 #              30ms heartbeat interval is threatened.
 EBPF_CONTROLLER_PID=""
-if [[ -x "$EBPF_CONTROLLER" && -f "$EBPF_BPF_OBJ" ]]; then
+if [[ "$USE_HEARTBEAT_MARK" == "0" ]]; then
+    echo "Heartbeat mark disabled — skipping ebpf-controller"
+elif [[ -x "$EBPF_CONTROLLER" && -f "$EBPF_BPF_OBJ" ]]; then
     "$EBPF_CONTROLLER" \
         --iface lo \
         --obj  "$EBPF_BPF_OBJ" \
         --metrics "http://127.0.0.1:9101/metrics" \
-        --rtt-ms 20 \
+        --rtt-ms 120 \
         >> /tmp/ebpf-controller.log 2>&1 &
     EBPF_CONTROLLER_PID=$!
     echo "ebpf-controller started (pid $EBPF_CONTROLLER_PID, log /tmp/ebpf-controller.log)"
@@ -178,13 +205,6 @@ run_parallel_noise_clients() {
         wait "$pid" 2>/dev/null || true
     done
 }
-
-# Optional: run a single scenario by name
-#   sudo bash scripts/run_test_suite.sh --scenario cross_datacenter
-FILTER_SCENARIO=""
-if [[ "${1:-}" == "--scenario" && -n "${2:-}" ]]; then
-    FILTER_SCENARIO="$2"
-fi
 
 # Map scenario phase params to the nearest named traffic-sim profile.
 map_to_profile() {
@@ -327,6 +347,15 @@ while IFS= read -r scenario; do
     ./scripts/collect_metrics.sh "$SCENARIO_DIR" &
     METRICS_PID=$!
 
+    # Start 10Hz tc queue stats logger (lo — same iface where tbf/netem are applied)
+    TC_STATS_PID=""
+    PYTHON="${VENV_PYTHON:-/home/tanay/cs380d/venv/bin/python3}"
+    if [[ -x "$PYTHON" ]]; then
+        "$PYTHON" "$SCRIPT_DIR/collect_tc_stats.py" "$SCENARIO_DIR" lo 0.1 \
+            >> "$SCENARIO_DIR/tc_stats_collector.log" 2>&1 &
+        TC_STATS_PID=$!
+    fi
+
     # Run the workload phases
     phase_num=0
     while IFS= read -r phase; do
@@ -398,7 +427,7 @@ while IFS= read -r scenario; do
                 --initial-cluster-state existing \
                 --election-timeout="${election_ms}" \
                 --heartbeat-interval="${heartbeat_ms}" \
-                --heartbeat-mark=0x1337 \
+                $([[ "$USE_HEARTBEAT_MARK" != "0" ]] && echo "--heartbeat-mark=0x1337") \
                 --max-request-bytes=10485760 \
                 --logger=zap --log-outputs=stderr \
                 >> "/tmp/etcd${killed_idx}.log" 2>&1 &
@@ -449,8 +478,10 @@ while IFS= read -r scenario; do
 EOF
     done < <(echo "$scenario" | jq -c '.phases[]')
 
-    # Stop metrics collection, noise generator, and noise nodes
+    # Stop metrics collection, tc stats logger, noise generator, and noise nodes
     kill $METRICS_PID 2>/dev/null || true
+    [[ -n "$TC_STATS_PID" ]] && kill "$TC_STATS_PID" 2>/dev/null || true
+    TC_STATS_PID=""
     [[ -n "$NOISE_PID" ]] && kill $NOISE_PID 2>/dev/null || true
     NOISE_PID=""
     if [[ "$use_noise" == "true" ]]; then

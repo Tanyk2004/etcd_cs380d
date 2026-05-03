@@ -34,25 +34,26 @@ from pathlib import Path
 #   [stats] profile=spike           ops/s=8234  put=8100 get=0 ...
 STATS_RE = re.compile(
     r'\[stats\]\s+'
-    r'(?:ts=(\d+)\s+)?'           # optional unix timestamp (group 1)
-    r'profile=(\S+)\s+'           # group 2
-    r'ops/s=\s*(\d+)\s+'          # group 3
-    r'put=\s*(\d+)\s+'            # group 4
-    r'get=\s*(\d+)\s+'            # group 5
+    r'(?:ts=(\d+)\s+)?'                    # optional unix timestamp (group 1)
+    r'profile=(\S+)\s+'                    # group 2
+    r'ops/s=\s*(\d+)\s+'                   # group 3
+    r'put=\s*(\d+)\s+'                     # group 4
+    r'get=\s*(\d+)\s+'                     # group 5
     r'del=\s*\d+\s+'
     r'txn=\s*\d+\s+'
     r'lease=\s*\d+\s+'
-    r'err=\s*(\d+)\s+'            # group 6
+    r'err=\s*(\d+)\s+'                     # group 6
+    r'(?:avg_ms=\s*([\d.]+)\s+)?'          # group 7 — optional average latency (ms)
     r'\|.*?lat\(u1ms=(\d+)\s+u10ms=(\d+)\s+u100ms=(\d+)\s+slow=(\d+)'
-    r'(?:\s+stalled=(\d+))?'           # group 11 — optional (backward compatible)
+    r'(?:\s+stalled=(\d+))?'               # group 13 — optional (backward compatible)
     r'\)'
-    # groups 7-10, optional 11
+    # groups 8-12, optional 13
 )
 
 FIELDS = [
-    'sample', 'profile', 'ops_per_s', 'puts_per_s', 'gets_per_s',
-    'errors_per_s', 'lat_u1ms', 'lat_u10ms', 'lat_u100ms', 'lat_slow',
-    'lat_stalled', 'error_rate',
+    'sample', 'ts', 'profile', 'ops_per_s', 'puts_per_s', 'gets_per_s',
+    'errors_per_s', 'avg_lat_ms', 'lat_u1ms', 'lat_u10ms', 'lat_u100ms',
+    'lat_slow', 'lat_stalled', 'error_rate',
 ]
 
 
@@ -61,6 +62,7 @@ def parse(log_path: Path, out_path: Path):
     # Value: summed numeric fields.
     ts_buckets: dict = defaultdict(lambda: {
         'ops': 0, 'puts': 0, 'gets': 0, 'errs': 0,
+        'avg_ms_sum': 0.0, 'avg_ms_count': 0,
         'u1': 0, 'u10': 0, 'u100': 0, 'slow': 0, 'stalled': 0,
     })
     ts_order = []   # insertion-order list of (ts, profile) keys
@@ -78,31 +80,36 @@ def parse(log_path: Path, out_path: Path):
                 puts     = int(m.group(4))
                 gets     = int(m.group(5))
                 errs     = int(m.group(6))
-                u1       = int(m.group(7))
-                u10      = int(m.group(8))
-                u100     = int(m.group(9))
-                slow     = int(m.group(10))
-                stalled  = int(m.group(11)) if m.group(11) is not None else 0
+                avg_ms   = float(m.group(7)) if m.group(7) is not None else 0.0
+                u1       = int(m.group(8))
+                u10      = int(m.group(9))
+                u100     = int(m.group(10))
+                slow     = int(m.group(11))
+                stalled  = int(m.group(12)) if m.group(12) is not None else 0
 
                 if ts_raw is not None:
                     key = (int(ts_raw), profile)
                     if key not in ts_buckets:
                         ts_order.append(key)
                     b = ts_buckets[key]
-                    b['ops']     += ops
-                    b['puts']    += puts
-                    b['gets']    += gets
-                    b['errs']    += errs
-                    b['u1']      += u1
-                    b['u10']     += u10
-                    b['u100']    += u100
-                    b['slow']    += slow
-                    b['stalled'] += stalled
+                    b['ops']          += ops
+                    b['puts']         += puts
+                    b['gets']         += gets
+                    b['errs']         += errs
+                    if avg_ms > 0:
+                        b['avg_ms_sum']   += avg_ms
+                        b['avg_ms_count'] += 1
+                    b['u1']           += u1
+                    b['u10']          += u10
+                    b['u100']         += u100
+                    b['slow']         += slow
+                    b['stalled']      += stalled
                 else:
                     # Legacy format: no timestamp — keep as separate sample
                     legacy_rows.append({
                         'profile': profile,
                         'ops': ops, 'puts': puts, 'gets': gets, 'errs': errs,
+                        'avg_ms': avg_ms,
                         'u1': u1, 'u10': u10, 'u100': u100, 'slow': slow,
                         'stalled': stalled,
                     })
@@ -113,17 +120,20 @@ def parse(log_path: Path, out_path: Path):
 
     # Emit timestamped rows in arrival order
     for key in ts_order:
+        ts_val, profile = key
         b = ts_buckets[key]
-        _, profile = key
         ops = b['ops']
         errs = b['errs']
+        avg_ms = round(b['avg_ms_sum'] / b['avg_ms_count'], 2) if b['avg_ms_count'] > 0 else 0.0
         rows.append({
             'sample':       len(rows),
+            'ts':           ts_val,
             'profile':      profile,
             'ops_per_s':    ops,
             'puts_per_s':   b['puts'],
             'gets_per_s':   b['gets'],
             'errors_per_s': errs,
+            'avg_lat_ms':   avg_ms,
             'lat_u1ms':     b['u1'],
             'lat_u10ms':    b['u10'],
             'lat_u100ms':   b['u100'],
@@ -138,11 +148,13 @@ def parse(log_path: Path, out_path: Path):
         errs = r['errs']
         rows.append({
             'sample':       len(rows),
+            'ts':           0,
             'profile':      r['profile'],
             'ops_per_s':    ops,
             'puts_per_s':   r['puts'],
             'gets_per_s':   r['gets'],
             'errors_per_s': errs,
+            'avg_lat_ms':   r.get('avg_ms', 0.0),
             'lat_u1ms':     r['u1'],
             'lat_u10ms':    r['u10'],
             'lat_u100ms':   r['u100'],

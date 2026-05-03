@@ -42,7 +42,7 @@ func main() {
 	objPath := flag.String("obj", "../bpf/tc_prio.bpf.o", "path to compiled BPF object")
 	metricsURL := flag.String("metrics", "http://localhost:2381/metrics", "etcd metrics endpoint")
 	interval := flag.Duration("interval", 200*time.Millisecond, "polling interval")
-	rttThresholdMs := flag.Float64("rtt-ms", 50.0, "p99 RTT threshold (ms) to trigger boost")
+	rttThresholdMs := flag.Float64("rtt-ms", 120.0, "mean peer RTT threshold (ms) to trigger boost; set above baseline (~100ms with 50ms netem) so boost only fires during congestion")
 	hysteresis := flag.Int("hysteresis", 5, "clean samples needed before turning boost off")
 	flag.Parse()
 
@@ -80,9 +80,9 @@ func main() {
 	defer cancel()
 
 	var (
-		prevHBFails float64 = -1 // -1 means we haven't sampled yet
-		cleanCount  int
-		boosting    bool
+		prevRttSum, prevRttCount float64
+		cleanCount               int
+		boosting                 bool
 	)
 
 	ticker := time.NewTicker(*interval)
@@ -108,7 +108,7 @@ func main() {
 		}
 	}
 
-	log.Printf("watching %s (rtt threshold=%.1fms, hysteresis=%d)", *metricsURL, *rttThresholdMs, *hysteresis)
+	log.Printf("watching %s (mean rtt threshold=%.1fms, hysteresis=%d)", *metricsURL, *rttThresholdMs, *hysteresis)
 
 	for {
 		select {
@@ -124,18 +124,27 @@ func main() {
 				continue
 			}
 
-			hbFails := m["etcd_server_heartbeat_send_failures_total"]
-			// etcd exports peer RTT as a summary so we get quantiles directly
-			rttP99ms := m["etcd_network_peer_round_trip_time_seconds_p99"] * 1000
+			// etcd_network_peer_round_trip_time_seconds is a histogram, not a
+			// summary, so there is no quantile="0.99" label.  Compute the mean
+			// RTT from the delta of _sum/_count between consecutive samples.
+			rttSum   := m["etcd_network_peer_round_trip_time_seconds_sum"]
+			rttCount := m["etcd_network_peer_round_trip_time_seconds_count"]
+			var rttMeanMs float64
+			dCount := rttCount - prevRttCount
+			if dCount > 0 {
+				rttMeanMs = (rttSum - prevRttSum) / dCount * 1000
+			}
+			prevRttSum, prevRttCount = rttSum, rttCount
 
-			hbGettingWorse := prevHBFails >= 0 && hbFails > prevHBFails
-			rttHigh := rttP99ms > *rttThresholdMs
-			prevHBFails = hbFails
+			rttHigh := dCount > 0 && rttMeanMs > *rttThresholdMs
 
-			if hbGettingWorse || rttHigh {
+			if rttHigh {
 				cleanCount = 0
 				setBoost(true)
-			} else if boosting {
+			} else if boosting && dCount > 0 {
+				// Only count down hysteresis when there's fresh data.
+				// When dCount==0 (no new RTT measurements since last poll)
+				// we don't know if RTT is low — keep boost ON.
 				cleanCount++
 				if cleanCount >= *hysteresis {
 					setBoost(false)

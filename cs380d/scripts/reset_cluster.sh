@@ -41,7 +41,7 @@ for i in 1 2 3; do
         --initial-cluster-state new \
         --election-timeout="${ELECTION_TIMEOUT_MS:-1000}" \
         --heartbeat-interval="${HEARTBEAT_INTERVAL_MS:-100}" \
-        --heartbeat-mark=0x1337 \
+        $([[ "${USE_HEARTBEAT_MARK:-1}" != "0" ]] && echo "--heartbeat-mark=0x1337") \
         --max-request-bytes=10485760 \
         --logger=zap --log-outputs=stderr \
         >> "/tmp/etcd${i}.log" 2>&1 &

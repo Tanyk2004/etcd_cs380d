@@ -65,6 +65,7 @@ func main() {
 		latU100ms  int64 // ops completing < 100ms
 		latSlow    int64 // ops taking ≥ 100ms (election / queue delay)
 		latElect   int64 // ops with lat >= stall-ms (election stall indicator)
+		latSumNs   int64 // cumulative latency (nanoseconds) across all ops
 	)
 
 	// ── Stop signal ───────────────────────────────────────────────────────────
@@ -82,8 +83,9 @@ func main() {
 	//   [stats] profile=<P> ops/s=<N> put=<N> get=<N> del=<N> txn=<N> lease=<N>
 	//           err=<N> | lat(u1ms=<N> u10ms=<N> u100ms=<N> slow=<N>)
 	go func() {
-		prevOps, prevErrs                          := int64(0), int64(0)
+		prevOps, prevErrs                              := int64(0), int64(0)
 		prevU1, prevU10, prevU100, prevSlow, prevElect := int64(0), int64(0), int64(0), int64(0), int64(0)
+		prevLatNs                                      := int64(0)
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
 		for {
@@ -92,13 +94,14 @@ func main() {
 				return
 			case <-ticker.C:
 			}
-			ops   := atomic.LoadInt64(&totalOps)
-			errs  := atomic.LoadInt64(&totalErrs)
-			u1    := atomic.LoadInt64(&latU1ms)
-			u10   := atomic.LoadInt64(&latU10ms)
-			u100  := atomic.LoadInt64(&latU100ms)
-			slow  := atomic.LoadInt64(&latSlow)
-			elect := atomic.LoadInt64(&latElect)
+			ops    := atomic.LoadInt64(&totalOps)
+			errs   := atomic.LoadInt64(&totalErrs)
+			u1     := atomic.LoadInt64(&latU1ms)
+			u10    := atomic.LoadInt64(&latU10ms)
+			u100   := atomic.LoadInt64(&latU100ms)
+			slow   := atomic.LoadInt64(&latSlow)
+			elect  := atomic.LoadInt64(&latElect)
+			latNs  := atomic.LoadInt64(&latSumNs)
 
 			dOps   := ops - prevOps
 			dErrs  := errs - prevErrs
@@ -107,16 +110,23 @@ func main() {
 			dU100  := u100 - prevU100
 			dSlow  := slow - prevSlow
 			dElect := elect - prevElect
+			dLatNs := latNs - prevLatNs
+
+			avgLatMs := 0.0
+			if dOps > 0 {
+				avgLatMs = float64(dLatNs) / float64(dOps) / 1e6
+			}
 
 			// put = successful ops; get/del/txn/lease = 0 (this client only writes)
 			fmt.Printf(
-				"[stats] ts=%-10d profile=%-15s ops/s=%-6d put=%-5d get=0     del=0     txn=0     lease=0     err=%-4d | lat(u1ms=%d u10ms=%d u100ms=%d slow=%d stalled=%d)\n",
+				"[stats] ts=%-10d profile=%-15s ops/s=%-6d put=%-5d get=0     del=0     txn=0     lease=0     err=%-4d avg_ms=%-7.1f | lat(u1ms=%d u10ms=%d u100ms=%d slow=%d stalled=%d)\n",
 				time.Now().Unix(), *profileFlag, dOps, dOps-dErrs, dErrs,
-				dU1, dU10, dU100, dSlow, dElect,
+				avgLatMs, dU1, dU10, dU100, dSlow, dElect,
 			)
 
 			prevOps, prevErrs = ops, errs
 			prevU1, prevU10, prevU100, prevSlow, prevElect = u1, u10, u100, slow, elect
+			prevLatNs = latNs
 		}
 	}()
 
@@ -161,6 +171,7 @@ func main() {
 				lat := time.Since(t0)
 
 				atomic.AddInt64(&totalOps, 1)
+				atomic.AddInt64(&latSumNs, lat.Nanoseconds())
 
 				if err != nil {
 					atomic.AddInt64(&totalErrs, 1)

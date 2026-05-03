@@ -14,7 +14,9 @@ STRIP ?= llvm-strip
 TC    ?= tc
 
 INCLUDES := -I/usr/include -I/usr/include/bpf -I/usr/include/x86_64-linux-gnu
-CFLAGS   := -O2 -Wall -target bpf -D__TARGET_ARCH_x86_64 $(INCLUDES)
+# -g generates BTF (BPF Type Format) required by cilium/ebpf to load maps.
+# llvm-strip without -g strips ELF symbols but leaves .BTF/.BTF.ext intact.
+CFLAGS   := -g -O2 -Wall -target bpf -D__TARGET_ARCH_x86_64 $(INCLUDES)
 
 OBJ := tc_prio.bpf.o
 SRC := tc_prio.bpf.c
@@ -25,7 +27,6 @@ all: $(OBJ)
 
 $(OBJ): $(SRC)
 	$(CLANG) $(CFLAGS) -c $< -o $@
-	$(STRIP) -g $@
 
 clean:
 	rm -f $(OBJ)

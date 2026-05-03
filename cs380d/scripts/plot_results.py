@@ -59,6 +59,7 @@ def load_scenario(scenario_dir: Path):
 
     # Normalise timestamp to seconds-from-start
     df["t"] = df["timestamp"] - df["timestamp"].iloc[0]
+    df["_epoch"] = float(df["timestamp"].iloc[0])
 
     # Derive election events (points where leader_changes increments).
     # Use > 0.5 threshold to be robust against float noise; also handle counter
@@ -73,10 +74,15 @@ def load_scenario(scenario_dir: Path):
     return df, analysis
 
 
-def load_ops_stats(scenario_dir: Path) -> pd.DataFrame:
-    """Load and concatenate all ops_phaseN.csv files into one DataFrame."""
+def load_ops_stats(scenario_dir: Path, epoch: float = 0) -> pd.DataFrame:
+    """Load and concatenate all ops_phaseN.csv files into one DataFrame.
+
+    When epoch is provided (unix timestamp of the first timeseries row), the
+    returned DataFrame gains a column ``t`` (seconds from scenario start) so
+    it can be plotted on the same axis as timeseries data.  Multiple
+    noise-client profiles at the same second are summed into one row.
+    """
     frames = []
-    offset = 0
     for csv_path in sorted(scenario_dir.glob("ops_phase*.csv")):
         try:
             f = pd.read_csv(csv_path)
@@ -84,12 +90,45 @@ def load_ops_stats(scenario_dir: Path) -> pd.DataFrame:
             continue
         if f.empty:
             continue
-        f["sample"] = f["sample"] + offset
-        offset = int(f["sample"].iloc[-1]) + 1
         frames.append(f)
     if not frames:
         return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True)
+
+    df = pd.concat(frames, ignore_index=True)
+
+    # If ts column is present and non-zero, aggregate by second across profiles.
+    if "ts" in df.columns and df["ts"].gt(0).any():
+        agg = {
+            "ops_per_s":    "sum",
+            "puts_per_s":   "sum",
+            "gets_per_s":   "sum",
+            "errors_per_s": "sum",
+            "lat_u1ms":     "sum",
+            "lat_u10ms":    "sum",
+            "lat_u100ms":   "sum",
+            "lat_slow":     "sum",
+            "error_rate":   "mean",
+        }
+        if "lat_stalled" in df.columns:
+            agg["lat_stalled"] = "sum"
+        # avg_lat_ms is a weighted average across profiles — compute manually
+        # after groupby so we don't just mean the per-profile means.
+        has_avg = "avg_lat_ms" in df.columns and df["avg_lat_ms"].gt(0).any()
+        if has_avg:
+            df["_lat_sum"] = df["avg_lat_ms"] * df["ops_per_s"]
+            agg["_lat_sum"]  = "sum"
+            agg["ops_per_s"] = "sum"   # already there; keep for weight
+        df = df[df["ts"] > 0].groupby("ts", as_index=False).agg(agg)
+        if has_avg:
+            df["avg_lat_ms"] = (df["_lat_sum"] / df["ops_per_s"].replace(0, np.nan)).fillna(0)
+            df.drop(columns=["_lat_sum"], inplace=True)
+        df = df.sort_values("ts").reset_index(drop=True)
+        df["sample"] = range(len(df))
+        df["t"] = df["ts"] - (epoch if epoch > 0 else df["ts"].iloc[0])
+    else:
+        df["t"] = df["sample"].astype(float)
+
+    return df
 
 
 def election_times(df):
@@ -358,13 +397,17 @@ def plot_throughput_degradation(df, ops_df, analysis, name):
     """
     etimes = election_times(df)
     has_ops = not ops_df.empty and "ops_per_s" in ops_df.columns
+    has_avg_lat = has_ops and "avg_lat_ms" in ops_df.columns and ops_df["avg_lat_ms"].gt(0).any()
 
     # Derive server-side commit rate from raw counter
     df["commit_rate"] = df["proposals_committed_total"].diff().fillna(0).clip(lower=0)
     df["slow_apply_rate"] = df["slow_apply_total"].diff().fillna(0).clip(lower=0)
     df["peer_bytes_rate"] = df["peer_sent_bytes_total"].diff().fillna(0).clip(lower=0) / 1024  # KB/s
 
-    fig, (ax_thr, ax_srv, ax_net) = plt.subplots(3, 1, figsize=(14, 10), sharex=False)
+    n_panels = 4 if has_avg_lat else 3
+    fig, axes = plt.subplots(n_panels, 1, figsize=(14, 4 * n_panels), sharex=True)
+    ax_thr, ax_lat_client, ax_srv, ax_net = (axes if n_panels == 4
+                                              else (axes[0], None, axes[1], axes[2]))
     fig.suptitle(
         f"{name} — throughput & raft performance penalty\n"
         f"({len(etimes)} election(s) detected — red shading = leaderless period)",
@@ -372,24 +415,32 @@ def plot_throughput_degradation(df, ops_df, analysis, name):
     )
 
     # ── top: client throughput ────────────────────────────────────────────────
-    if has_ops:
-        ax_thr.fill_between(ops_df["sample"], ops_df["ops_per_s"],
+    # ops_df["t"] is seconds from scenario start (same epoch as df["t"]),
+    # so election vlines align correctly with the client throughput trace.
+    if has_ops and "t" in ops_df.columns:
+        x_ops = ops_df["t"]
+        ax_thr.fill_between(x_ops, ops_df["ops_per_s"],
                             color=C_OPS, alpha=0.25, linewidth=0)
-        ax_thr.plot(ops_df["sample"], ops_df["ops_per_s"],
+        ax_thr.plot(x_ops, ops_df["ops_per_s"],
                     color=C_OPS, linewidth=1.5, label="ops / s (client)")
         ax_err = ax_thr.twinx()
-        ax_err.fill_between(ops_df["sample"], ops_df["errors_per_s"],
+        ax_err.fill_between(x_ops, ops_df["errors_per_s"],
                             color=C_ERR, alpha=0.3, linewidth=0)
-        ax_err.plot(ops_df["sample"], ops_df["errors_per_s"],
+        ax_err.plot(x_ops, ops_df["errors_per_s"],
                     color=C_ERR, linewidth=1.2, linestyle="--", label="errors / s")
         ax_err.set_ylabel("Errors / s", fontsize=8, color=C_ERR)
 
-        # Shade slow-op periods (lat_slow > 0)
-        slow_mask = ops_df["lat_slow"] > 0
-        if slow_mask.any():
-            ax_thr.fill_between(ops_df["sample"], 0, ops_df["ops_per_s"].max(),
-                                where=slow_mask, color=C_SLOW, alpha=0.15, zorder=0,
-                                label="slow ops present (>100ms)")
+        # Shade stalled-op periods (lat_stalled > 0) — election-induced stalls
+        if "lat_stalled" in ops_df.columns:
+            stall_mask = ops_df["lat_stalled"] > 0
+            if stall_mask.any():
+                ax_thr.fill_between(x_ops, 0, ops_df["ops_per_s"].max(),
+                                    where=stall_mask, color=C_ELECTION, alpha=0.15,
+                                    zorder=0, label=f"election stalls (lat≥{ops_df['lat_stalled'].gt(0).sum()}s)")
+        elif ops_df["lat_slow"].gt(0).any():
+            ax_thr.fill_between(x_ops, 0, ops_df["ops_per_s"].max(),
+                                where=ops_df["lat_slow"] > 0, color=C_SLOW, alpha=0.15,
+                                zorder=0, label="slow ops (>100ms)")
         lines1, labels1 = ax_thr.get_legend_handles_labels()
         lines2, labels2 = ax_err.get_legend_handles_labels()
         ax_thr.legend(lines1 + lines2, labels1 + labels2, fontsize=7, loc="upper left")
@@ -400,11 +451,31 @@ def plot_throughput_degradation(df, ops_df, analysis, name):
                     fontsize=9, color="grey")
 
     ax_thr.set_ylabel("Ops / s", fontsize=8, color=C_OPS)
-    ax_thr.set_title("Client-side throughput — drops to zero during elections", fontsize=9)
+    ax_thr.set_title("Client-side throughput — drops during elections (aligned to server timeline)", fontsize=9)
     add_election_vlines(ax_thr, etimes)
-    ax_thr.set_xlabel("Sample (≈ seconds)", fontsize=8)
 
-    # ── middle: server commit rate + slow applies ─────────────────────────────
+    # ── client avg latency (only when avg_lat_ms is present) ─────────────────
+    C_LAT = "#2980b9"   # blue
+    if has_avg_lat and ax_lat_client is not None:
+        x_ops = ops_df["t"]
+        lat_smooth = ops_df["avg_lat_ms"].rolling(3, min_periods=1).mean()
+        ax_lat_client.fill_between(x_ops, lat_smooth, color=C_LAT, alpha=0.2, linewidth=0)
+        ax_lat_client.plot(x_ops, lat_smooth, color=C_LAT, linewidth=1.5, label="avg RTT (ms, 3s smooth)")
+        # Shade stall periods so the correlation is visually explicit
+        if "lat_stalled" in ops_df.columns and ops_df["lat_stalled"].gt(0).any():
+            ax_lat_client.fill_between(x_ops, 0, lat_smooth.max() * 1.05,
+                                       where=ops_df["lat_stalled"] > 0,
+                                       color=C_ELECTION, alpha=0.15, zorder=0,
+                                       label="election stall window")
+        add_election_vlines(ax_lat_client, etimes, label=True)
+        ax_lat_client.set_ylabel("Avg RTT\n(ms)", fontsize=8, color=C_LAT)
+        ax_lat_client.set_title(
+            "Client avg request latency — spikes when WLock stalls all handlers during election",
+            fontsize=9,
+        )
+        ax_lat_client.legend(fontsize=7, loc="upper left")
+
+    # ── server commit rate + slow applies ────────────────────────────────────
     ax_srv.fill_between(df["t"], df["commit_rate"],
                         color=C_COMMIT, alpha=0.25, linewidth=0)
     ax_srv.plot(df["t"], df["commit_rate"],
@@ -422,7 +493,6 @@ def plot_throughput_degradation(df, ops_df, analysis, name):
     ax_srv.legend(lines1 + lines2, labels1 + labels2, fontsize=7, loc="upper left")
     ax_srv.set_ylabel("Committed proposals / s", fontsize=8, color=C_COMMIT)
     ax_srv.set_title("Server-side commit rate — confirms writes stall, not just client throttling", fontsize=9)
-    ax_srv.set_xlabel("Time (s)", fontsize=8)
 
     # ── bottom: peer bytes/s + proposals pending ──────────────────────────────
     ax_net.fill_between(df["t"], df["peer_bytes_rate"],
@@ -441,6 +511,129 @@ def plot_throughput_degradation(df, ops_df, analysis, name):
     ax_net.set_ylabel("Peer sent KB/s", fontsize=8, color="#9b59b6")
     ax_net.set_title("Network utilisation — saturated pipeline blocks heartbeats", fontsize=9)
     ax_net.set_xlabel("Time (s)", fontsize=8)
+
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    return fig
+
+
+# ── tc queue saturation ───────────────────────────────────────────────────────
+
+C_BACKLOG   = "#8e44ad"   # purple – backlog fill
+C_DROPS     = "#c0392b"   # red    – drops/s
+C_OVERLIMIT = "#e67e22"   # orange – overlimits/s
+C_SENT      = "#2980b9"   # blue   – throughput
+
+
+def plot_tc_queue(scenario_dir: Path, df, name):
+    """
+    Three-panel page showing network queue saturation over time.
+
+    Top   : Instantaneous backlog_bytes in the tbf (or netem) qdisc — how full
+            the queue is.  A horizontal reference line marks the queue burst
+            capacity if derivable from the data.
+    Middle: Drop rate and overlimit rate per second (derived from cumulative
+            counter deltas) — directly shows when tc is throttling packets.
+    Bottom: Sent throughput (KB/s through the qdisc).
+
+    All panels share the x-axis (seconds from scenario start) and carry the
+    election vlines from timeseries data so saturation events align with Raft.
+    """
+    tc_path = scenario_dir / "tc_stats.csv"
+    if not tc_path.exists():
+        return None
+
+    try:
+        tc = pd.read_csv(tc_path)
+    except Exception:
+        return None
+
+    if tc.empty:
+        return None
+
+    # Prefer tbf (rate-limiting qdisc); fall back to netem, then any qdisc.
+    for preferred in ("tbf", "netem"):
+        sub = tc[tc["type"] == preferred]
+        if not sub.empty:
+            tc = sub.copy()
+            qdisc_type = preferred
+            break
+    else:
+        tc = tc.copy()
+        qdisc_type = tc["type"].iloc[0] if not tc.empty else "unknown"
+
+    # Align to scenario epoch from timeseries df
+    epoch = float(df["_epoch"].iloc[0]) if "_epoch" in df.columns else 0
+    tc["t"] = tc["timestamp_ms"] / 1000.0 - (epoch if epoch > 0 else tc["timestamp_ms"].iloc[0] / 1000.0)
+
+    # Sort by time, reset index
+    tc = tc.sort_values("t").reset_index(drop=True)
+
+    # Derive per-sample rates from cumulative counters (diff, clip negatives = resets)
+    dt = tc["t"].diff().fillna(0.1).clip(lower=0.01)
+    tc["drops_per_s"]      = tc["dropped"].diff().fillna(0).clip(lower=0) / dt
+    tc["overlimits_per_s"] = tc["overlimits"].diff().fillna(0).clip(lower=0) / dt
+    tc["sent_kb_per_s"]    = tc["sent_bytes"].diff().fillna(0).clip(lower=0) / dt / 1024
+
+    # Smooth 1s rolling window (10 samples at 0.1s interval)
+    w = 10
+    tc["drops_s"]      = tc["drops_per_s"].rolling(w, min_periods=1).mean()
+    tc["overlimits_s"] = tc["overlimits_per_s"].rolling(w, min_periods=1).mean()
+    tc["sent_s"]       = tc["sent_kb_per_s"].rolling(w, min_periods=1).mean()
+
+    etimes = election_times(df)
+
+    fig, (ax_bl, ax_dr, ax_bw) = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
+    fig.suptitle(
+        f"{name} — network queue saturation ({qdisc_type} qdisc on lo)\n"
+        f"({len(etimes)} election(s) — purple dashed = election event)",
+        fontsize=11, fontweight="bold",
+    )
+
+    # ── top: backlog bytes ────────────────────────────────────────────────────
+    ax_bl.fill_between(tc["t"], tc["backlog_bytes"] / 1024,
+                       color=C_BACKLOG, alpha=0.3, linewidth=0)
+    ax_bl.plot(tc["t"], tc["backlog_bytes"] / 1024,
+               color=C_BACKLOG, linewidth=1.0, label="backlog (KB)")
+    # Burst capacity reference: 90th-percentile max as a proxy if we can't read tc params
+    cap_kb = tc["backlog_bytes"].quantile(0.99) / 1024
+    if cap_kb > 0:
+        ax_bl.axhline(cap_kb, color=C_BACKLOG, linewidth=1.0, linestyle=":",
+                      alpha=0.7, label=f"p99 peak {cap_kb:.0f} KB")
+    ax_bl.set_ylabel("Queue backlog\n(KB)", fontsize=8)
+    ax_bl.set_title("Queue depth — spikes indicate buffer-fill preceding drops", fontsize=9)
+    add_election_vlines(ax_bl, etimes)
+    ax_bl.legend(fontsize=7, loc="upper left")
+    ax_bl.tick_params(labelbottom=False)
+
+    # ── middle: drop + overlimit rate ─────────────────────────────────────────
+    ax_dr.fill_between(tc["t"], tc["drops_s"],
+                       color=C_DROPS, alpha=0.35, linewidth=0)
+    ax_dr.plot(tc["t"], tc["drops_s"],
+               color=C_DROPS, linewidth=1.2, label="drops / s")
+    ax_ov = ax_dr.twinx()
+    ax_ov.fill_between(tc["t"], tc["overlimits_s"],
+                       color=C_OVERLIMIT, alpha=0.25, linewidth=0)
+    ax_ov.plot(tc["t"], tc["overlimits_s"],
+               color=C_OVERLIMIT, linewidth=1.0, linestyle="--", label="overlimits / s")
+    ax_ov.set_ylabel("Overlimits / s", fontsize=8, color=C_OVERLIMIT)
+    add_election_vlines(ax_dr, etimes, label=False)
+    lines1, lbl1 = ax_dr.get_legend_handles_labels()
+    lines2, lbl2 = ax_ov.get_legend_handles_labels()
+    ax_dr.legend(lines1 + lines2, lbl1 + lbl2, fontsize=7, loc="upper left")
+    ax_dr.set_ylabel("Drops / s", fontsize=8, color=C_DROPS)
+    ax_dr.set_title("Drop & overlimit rates — packet loss when queue overflows", fontsize=9)
+    ax_dr.tick_params(labelbottom=False)
+
+    # ── bottom: sent throughput ───────────────────────────────────────────────
+    ax_bw.fill_between(tc["t"], tc["sent_s"],
+                       color=C_SENT, alpha=0.25, linewidth=0)
+    ax_bw.plot(tc["t"], tc["sent_s"],
+               color=C_SENT, linewidth=1.2, label="sent KB/s")
+    add_election_vlines(ax_bw, etimes, label=False)
+    ax_bw.set_ylabel("Throughput\n(KB/s)", fontsize=8)
+    ax_bw.set_title("Sent throughput — drops when queue is saturated", fontsize=9)
+    ax_bw.set_xlabel("Time (s)", fontsize=8)
+    ax_bw.legend(fontsize=7, loc="upper left")
 
     fig.tight_layout(rect=[0, 0, 1, 0.95])
     return fig
@@ -585,8 +778,9 @@ def main(results_dir: str):
             print(f"  skip {d.name}/ (no timeseries.csv)")
             continue
         print(f"  loaded {d.name}/ ({len(df)} rows)")
-        ops_df = load_ops_stats(d)
-        scenarios_data.append({"name": d.name, "df": df, "analysis": analysis, "ops_df": ops_df})
+        epoch = float(df["_epoch"].iloc[0]) if "_epoch" in df.columns else 0
+        ops_df = load_ops_stats(d, epoch=epoch)
+        scenarios_data.append({"name": d.name, "dir": d, "df": df, "analysis": analysis, "ops_df": ops_df})
 
     if not scenarios_data:
         print("No scenario data found (no timeseries.csv files).", file=sys.stderr)
@@ -614,6 +808,7 @@ def main(results_dir: str):
             analysis = s["analysis"]
             name     = s["name"]
             ops_df   = s.get("ops_df", pd.DataFrame())
+            sdir     = s.get("dir", root / name)
 
             # ── causal chain page ─────────────────────────────────────────
             fig = plt.figure(figsize=(12, 8))
@@ -653,6 +848,13 @@ def main(results_dir: str):
             pdf.savefig(fig4)
             fig4.savefig(png_dir / f"{name}_latency_elections.png", dpi=150)
             plt.close(fig4)
+
+            # ── tc queue saturation page (optional — needs tc_stats.csv) ──
+            fig5 = plot_tc_queue(sdir, df, name)
+            if fig5 is not None:
+                pdf.savefig(fig5)
+                fig5.savefig(png_dir / f"{name}_tc_queue.png", dpi=150)
+                plt.close(fig5)
 
         # PDF metadata
         d = pdf.infodict()
