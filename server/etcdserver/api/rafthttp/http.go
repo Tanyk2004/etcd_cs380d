@@ -15,10 +15,12 @@
 package rafthttp
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"path"
 	"strings"
@@ -28,6 +30,7 @@ import (
 	"go.uber.org/zap"
 
 	"go.etcd.io/etcd/api/v3/version"
+	"go.etcd.io/etcd/client/pkg/v3/transport"
 	"go.etcd.io/etcd/client/pkg/v3/types"
 	pioutil "go.etcd.io/etcd/pkg/v3/ioutil"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/snap"
@@ -440,16 +443,39 @@ func (h *streamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.(http.Flusher).Flush()
 
+	// If HeartbeatMark is configured, hijack the accepted connection so we can
+	// set SO_MARK on it.  Heartbeat writes happen on the server-side (accepted)
+	// socket — the dialer-side mark only covers connection-setup and probe
+	// traffic — so we must tag the accepted socket here to actually prioritize
+	// heartbeat packets in the TC egress path.
+	if h.tr.HeartbeatMark != 0 {
+		if hj, ok := w.(http.Hijacker); ok {
+			if rawConn, bufrw, hjErr := hj.Hijack(); hjErr == nil {
+				transport.SetMarkOnConn(rawConn, h.tr.HeartbeatMark)
+				hc := &hijackedStreamConn{conn: rawConn, done: make(chan struct{})}
+				p.attachOutgoingConn(&outgoingConn{
+					t:       t,
+					Writer:  bufrw,
+					Flusher: bufioHTTPFlusher{bufrw.Writer},
+					Closer:  hc,
+					localID: h.tr.ID,
+					peerID:  from,
+				})
+				<-hc.done
+				return
+			}
+		}
+	}
+
 	c := newCloseNotifier()
-	conn := &outgoingConn{
+	p.attachOutgoingConn(&outgoingConn{
 		t:       t,
 		Writer:  w,
 		Flusher: w.(http.Flusher),
 		Closer:  c,
 		localID: h.tr.ID,
 		peerID:  from,
-	}
-	p.attachOutgoingConn(conn)
+	})
 	<-c.closeNotify()
 }
 
@@ -513,6 +539,29 @@ func checkClusterCompatibilityFromHeader(lg *zap.Logger, localID types.ID, heade
 		return ErrClusterIDMismatch
 	}
 	return nil
+}
+
+// bufioHTTPFlusher adapts *bufio.Writer to the http.Flusher interface (which
+// has a no-return Flush). Used after a stream connection has been hijacked.
+type bufioHTTPFlusher struct{ bw *bufio.Writer }
+
+func (f bufioHTTPFlusher) Flush() { f.bw.Flush() }
+
+// hijackedStreamConn is an io.Closer for an HTTP-hijacked net.Conn. Closing
+// it shuts down the raw TCP connection and signals the ServeHTTP goroutine.
+type hijackedStreamConn struct {
+	conn net.Conn
+	done chan struct{}
+}
+
+func (h *hijackedStreamConn) Close() error {
+	err := h.conn.Close()
+	select {
+	case <-h.done:
+	default:
+		close(h.done)
+	}
+	return err
 }
 
 type closeNotifier struct {
