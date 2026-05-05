@@ -148,11 +148,11 @@ def pass_fail_color(ok):
 
 # ── per-scenario: causal-chain plot ──────────────────────────────────────────
 
-def plot_causal_chain(df, analysis, name, ax_top, ax_mid, ax_bot):
+def plot_causal_chain(df, analysis, name, ax_top, ax_mid, ax_bot, ops_df=None):
     """
     Three vertically-stacked axes sharing the x-axis:
       top : proposals_pending  (application pressure)
-      mid : hb_send_failures rate  (heartbeat drops)
+      mid : client avg RTT (ms) when ops_df available, else hb_send_failures rate
       bot : cumulative leader_changes + election event markers
     Election vlines are drawn across all three to show the causal link.
     """
@@ -169,12 +169,27 @@ def plot_causal_chain(df, analysis, name, ax_top, ax_mid, ax_bot):
     ax_top.legend(fontsize=7, loc="upper left")
     ax_top.tick_params(labelbottom=False)
 
-    # ── mid: heartbeat failure rate ───────────────────────────────────────────
-    ax_mid.fill_between(df["t"], df["hb_fail_rate"],
-                        color=C_HB_FAIL, alpha=0.35, linewidth=0)
-    ax_mid.plot(df["t"], df["hb_fail_rate"],
-                color=C_HB_FAIL, linewidth=1.2, label="hb failures / s")
-    ax_mid.set_ylabel("HB Failures\n(rate/s)", fontsize=8)
+    # ── mid: client avg RTT or heartbeat failure rate ─────────────────────────
+    has_avg = (
+        ops_df is not None and not ops_df.empty
+        and "avg_lat_ms" in ops_df.columns
+        and "t" in ops_df.columns
+        and ops_df["avg_lat_ms"].gt(0).any()
+    )
+    C_LAT = "#2980b9"
+    if has_avg:
+        lat_smooth = ops_df["avg_lat_ms"].rolling(3, min_periods=1).mean()
+        ax_mid.fill_between(ops_df["t"], lat_smooth, color=C_LAT, alpha=0.25, linewidth=0)
+        ax_mid.plot(ops_df["t"], lat_smooth, color=C_LAT, linewidth=1.5,
+                    label="avg client RTT (ms, 3s smooth)")
+        ax_mid.set_ylabel("Avg RTT\n(ms)", fontsize=8, color=C_LAT)
+        ax_mid.set_title("Client avg request latency — spikes when election blocks handlers", fontsize=8)
+    else:
+        ax_mid.fill_between(df["t"], df["hb_fail_rate"],
+                            color=C_HB_FAIL, alpha=0.35, linewidth=0)
+        ax_mid.plot(df["t"], df["hb_fail_rate"],
+                    color=C_HB_FAIL, linewidth=1.2, label="hb failures / s")
+        ax_mid.set_ylabel("HB Failures\n(rate/s)", fontsize=8)
     add_election_vlines(ax_mid, etimes, label=False)
     ax_mid.legend(fontsize=7, loc="upper left")
     ax_mid.tick_params(labelbottom=False)
@@ -461,12 +476,16 @@ def plot_throughput_degradation(df, ops_df, analysis, name):
         lat_smooth = ops_df["avg_lat_ms"].rolling(3, min_periods=1).mean()
         ax_lat_client.fill_between(x_ops, lat_smooth, color=C_LAT, alpha=0.2, linewidth=0)
         ax_lat_client.plot(x_ops, lat_smooth, color=C_LAT, linewidth=1.5, label="avg RTT (ms, 3s smooth)")
-        # Shade stall periods so the correlation is visually explicit
-        if "lat_stalled" in ops_df.columns and ops_df["lat_stalled"].gt(0).any():
-            ax_lat_client.fill_between(x_ops, 0, lat_smooth.max() * 1.05,
-                                       where=ops_df["lat_stalled"] > 0,
-                                       color=C_ELECTION, alpha=0.15, zorder=0,
-                                       label="election stall window")
+        # Shade election windows — only when stalls are infrequent enough to be
+        # meaningful (if >50% of samples are stalled the threshold is too low
+        # and the shading just covers everything, obscuring the signal).
+        if "lat_stalled" in ops_df.columns:
+            stall_frac = ops_df["lat_stalled"].gt(0).mean()
+            if 0 < stall_frac < 0.5:
+                ax_lat_client.fill_between(x_ops, 0, lat_smooth.max() * 1.05,
+                                           where=ops_df["lat_stalled"] > 0,
+                                           color=C_ELECTION, alpha=0.15, zorder=0,
+                                           label="election stall window")
         add_election_vlines(ax_lat_client, etimes, label=True)
         ax_lat_client.set_ylabel("Avg RTT\n(ms)", fontsize=8, color=C_LAT)
         ax_lat_client.set_title(
@@ -823,7 +842,7 @@ def main(results_dir: str):
             ax_mid = fig.add_subplot(gs[1], sharex=ax_top)
             ax_bot = fig.add_subplot(gs[2], sharex=ax_top)
 
-            plot_causal_chain(df, analysis, name, ax_top, ax_mid, ax_bot)
+            plot_causal_chain(df, analysis, name, ax_top, ax_mid, ax_bot, ops_df=ops_df)
             fig.tight_layout(rect=[0, 0, 1, 0.96])
             pdf.savefig(fig)
             fig.savefig(png_dir / f"{name}_causal_chain.png", dpi=150)

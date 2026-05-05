@@ -34,11 +34,32 @@ NOISE_PID=""
 TC_EXPORTER_PID=""
 EBPF_CONTROLLER_PID=""
 TC_STATS_PID=""
+
+# iptables rules that mark etcd peer-port TCP traffic with SO_MARK 0x1337 so
+# the BPF program can route those packets to the priority band (bypassing tbf).
+# The SO_MARK on the dialing (follower) socket only marks the outgoing SYN and
+# request data; the leader's accepted socket has no mark, so heartbeat response
+# data would otherwise go through the rate-limited band.  Marking at the mangle
+# OUTPUT level fixes both directions.
+_install_iptables_marks() {
+    for port in 12380 22380 32380; do
+        iptables -t mangle -A OUTPUT -p tcp --sport "$port" -j MARK --set-mark 0x1337 2>/dev/null || true
+        iptables -t mangle -A OUTPUT -p tcp --dport "$port" -j MARK --set-mark 0x1337 2>/dev/null || true
+    done
+}
+_remove_iptables_marks() {
+    for port in 12380 22380 32380; do
+        iptables -t mangle -D OUTPUT -p tcp --sport "$port" -j MARK --set-mark 0x1337 2>/dev/null || true
+        iptables -t mangle -D OUTPUT -p tcp --dport "$port" -j MARK --set-mark 0x1337 2>/dev/null || true
+    done
+}
+
 cleanup() {
     [[ -n "$NOISE_PID" ]]            && kill "$NOISE_PID"            2>/dev/null || true
     [[ -n "$TC_EXPORTER_PID" ]]      && kill "$TC_EXPORTER_PID"      2>/dev/null || true
     [[ -n "$EBPF_CONTROLLER_PID" ]]  && kill "$EBPF_CONTROLLER_PID"  2>/dev/null || true
     [[ -n "$TC_STATS_PID" ]]         && kill "$TC_STATS_PID"         2>/dev/null || true
+    _remove_iptables_marks
     stop_noise_nodes 2>/dev/null || true
     chown -R "$REAL_USER:" "$RESULTS_DIR" 2>/dev/null || true
 }
@@ -93,19 +114,20 @@ else
 fi
 
 # Start the ebpf-controller: loads bpf/tc_prio.bpf.o, attaches it to TC egress
-# on lo, and toggles heartbeat priority boosting when RTT or hb-failures rise.
+# on lo, and toggles heartbeat priority boosting when the tbf qdisc reports
+# overlimits (= link is actively rate-limited = bandwidth congestion).
 # Requires CAP_NET_ADMIN + CAP_BPF (run_test_suite.sh is already invoked via sudo).
-# --rtt-ms 20: boost kicks in when peer RTT exceeds 20ms, well before the
-#              30ms heartbeat interval is threatened.
 EBPF_CONTROLLER_PID=""
 if [[ "$USE_HEARTBEAT_MARK" == "0" ]]; then
-    echo "Heartbeat mark disabled — skipping ebpf-controller"
+    echo "Heartbeat mark disabled — skipping ebpf-controller and iptables marks"
 elif [[ -x "$EBPF_CONTROLLER" && -f "$EBPF_BPF_OBJ" ]]; then
+    # Mark etcd peer TCP traffic at the kernel level so both the leader's
+    # accepted sockets and the follower's dialed sockets carry mark 0x1337.
+    _install_iptables_marks
+    echo "iptables marks installed for etcd peer ports (12380, 22380, 32380)"
     "$EBPF_CONTROLLER" \
         --iface lo \
         --obj  "$EBPF_BPF_OBJ" \
-        --metrics "http://127.0.0.1:9101/metrics" \
-        --rtt-ms 120 \
         >> /tmp/ebpf-controller.log 2>&1 &
     EBPF_CONTROLLER_PID=$!
     echo "ebpf-controller started (pid $EBPF_CONTROLLER_PID, log /tmp/ebpf-controller.log)"

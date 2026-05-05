@@ -1,15 +1,19 @@
-// ebpf-controller: watches etcd metrics and toggles Raft heartbeat priority
-// boosting via a BPF map.
+// ebpf-controller: watches tc qdisc congestion and toggles Raft heartbeat
+// priority boosting via a BPF map.
 //
 // Run as root (needs CAP_NET_ADMIN + CAP_BPF):
-//   sudo ./ebpf-controller --iface eth0 --obj ../bpf/tc_prio.bpf.o \
-//       --metrics http://localhost:2381/metrics
+//   sudo ./ebpf-controller --iface lo --obj ../bpf/tc_prio.bpf.o
 //
 // It loads the compiled BPF program, attaches it to the TC egress hook of
-// the given interface, then polls etcd's /metrics endpoint. If heartbeat
-// failures start increasing or peer RTT goes above --rtt-ms, it writes 1 to
-// the boost_config BPF map which tells the kernel program to start
-// prioritizing marked packets. Once things calm down it turns it back off.
+// the given interface, then polls the tbf qdisc overlimits counter on that
+// same interface.  When the tbf qdisc is actively rate-limiting packets
+// (overlimits counter increasing), it writes 1 to the boost_config BPF map
+// which tells the kernel program to start prioritizing marked packets.  Once
+// the link is no longer congested it turns boosting back off.
+//
+// Using tc overlimits instead of etcd RTT metrics because the RTT histogram
+// only updates every ~30 s (peer probe interval), causing the boost to cycle
+// ON for 1 s / OFF for 30 s.  The tc overlimits counter updates every poll.
 package main
 
 import (
@@ -17,10 +21,9 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"net"
-	"net/http"
+	"os/exec"
 	"os/signal"
 	"strconv"
 	"strings"
@@ -38,12 +41,10 @@ type bpfObjects struct {
 }
 
 func main() {
-	iface := flag.String("iface", "eth0", "network interface to attach to")
-	objPath := flag.String("obj", "../bpf/tc_prio.bpf.o", "path to compiled BPF object")
-	metricsURL := flag.String("metrics", "http://localhost:2381/metrics", "etcd metrics endpoint")
-	interval := flag.Duration("interval", 200*time.Millisecond, "polling interval")
-	rttThresholdMs := flag.Float64("rtt-ms", 120.0, "mean peer RTT threshold (ms) to trigger boost; set above baseline (~100ms with 50ms netem) so boost only fires during congestion")
-	hysteresis := flag.Int("hysteresis", 5, "clean samples needed before turning boost off")
+	iface      := flag.String("iface", "eth0", "network interface to attach BPF to and watch tc stats on")
+	objPath    := flag.String("obj", "../bpf/tc_prio.bpf.o", "path to compiled BPF object")
+	interval   := flag.Duration("interval", 200*time.Millisecond, "polling interval")
+	hysteresis := flag.Int("hysteresis", 15, "consecutive idle polls before turning boost off (default 15 = 3s at 200ms poll)")
 	flag.Parse()
 
 	// load the BPF program from the compiled object file
@@ -80,10 +81,12 @@ func main() {
 	defer cancel()
 
 	var (
-		prevRttSum, prevRttCount float64
-		cleanCount               int
-		boosting                 bool
+		prevOverlimits uint64
+		cleanCount     int
+		boosting       bool
 	)
+
+	log.Printf("watching tc tbf overlimits+backlog on %s (hysteresis=%d)", *iface, *hysteresis)
 
 	ticker := time.NewTicker(*interval)
 	defer ticker.Stop()
@@ -108,8 +111,6 @@ func main() {
 		}
 	}
 
-	log.Printf("watching %s (mean rtt threshold=%.1fms, hysteresis=%d)", *metricsURL, *rttThresholdMs, *hysteresis)
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -118,33 +119,27 @@ func main() {
 			return
 
 		case <-ticker.C:
-			m, err := scrapeMetrics(*metricsURL)
+			overlimits, backlog, err := readTbfStats(*iface)
 			if err != nil {
-				log.Printf("metrics scrape failed: %v", err)
+				log.Printf("tc stat failed: %v", err)
 				continue
 			}
 
-			// etcd_network_peer_round_trip_time_seconds is a histogram, not a
-			// summary, so there is no quantile="0.99" label.  Compute the mean
-			// RTT from the delta of _sum/_count between consecutive samples.
-			rttSum   := m["etcd_network_peer_round_trip_time_seconds_sum"]
-			rttCount := m["etcd_network_peer_round_trip_time_seconds_count"]
-			var rttMeanMs float64
-			dCount := rttCount - prevRttCount
-			if dCount > 0 {
-				rttMeanMs = (rttSum - prevRttSum) / dCount * 1000
-			}
-			prevRttSum, prevRttCount = rttSum, rttCount
+			delta := overlimits - prevOverlimits
+			prevOverlimits = overlimits
 
-			rttHigh := dCount > 0 && rttMeanMs > *rttThresholdMs
+			// Congested when:
+			//   delta > 0  — new packets were rate-limited in this 200ms window
+			//   backlog > 0 — packets are currently queued in the tbf (link is full)
+			// Using both signals prevents false "idle" reads during bursty floods
+			// where a 200ms window might have zero new overlimits even though the
+			// link remains saturated.
+			congested := delta > 0 || backlog > 0
 
-			if rttHigh {
+			if congested {
 				cleanCount = 0
 				setBoost(true)
-			} else if boosting && dCount > 0 {
-				// Only count down hysteresis when there's fresh data.
-				// When dCount==0 (no new RTT measurements since last poll)
-				// we don't know if RTT is low — keep boost ON.
+			} else if boosting {
 				cleanCount++
 				if cleanCount >= *hysteresis {
 					setBoost(false)
@@ -155,66 +150,63 @@ func main() {
 	}
 }
 
-// scrapeMetrics hits the etcd Prometheus endpoint and returns a flat map of
-// metric name -> value. For summary quantiles it adds a "_p99" suffix.
-func scrapeMetrics(url string) (map[string]float64, error) {
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, err
+// readTbfStats runs `tc -s qdisc show dev <iface>` and returns the cumulative
+// overlimits counter and current backlog_bytes from the tbf qdisc.
+func readTbfStats(iface string) (overlimits, backlogBytes uint64, err error) {
+	out, e := exec.Command("tc", "-s", "qdisc", "show", "dev", iface).Output()
+	if e != nil {
+		return 0, 0, fmt.Errorf("tc -s qdisc show dev %s: %w", iface, e)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status: %s", resp.Status)
-	}
-	return parsePrometheusText(resp.Body), nil
+	overlimits, backlogBytes = parseTbfStats(string(out))
+	return
 }
 
-// parsePrometheusText is a quick-and-dirty Prometheus text format parser.
-// Good enough for our needs - handles counters, gauges, and summary quantiles.
-func parsePrometheusText(r io.Reader) map[string]float64 {
-	out := make(map[string]float64)
-	scanner := bufio.NewScanner(r)
+// parseTbfStats finds the tbf qdisc block in `tc -s qdisc show` output and
+// extracts the cumulative overlimits count and current backlog in bytes.
+//
+// Example output block:
+//   qdisc tbf 20: parent 1:2 rate 100Mbit burst 250Kb lat 200.0ms
+//    Sent 123456 bytes 789 pkt (dropped 0, overlimits 4567 requeues 0)
+//    backlog 12345b 10p requeues 0
+func parseTbfStats(output string) (overlimits, backlogBytes uint64) {
+	inTbf := false
+	scanner := bufio.NewScanner(strings.NewReader(output))
 	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "#") || line == "" {
+		trimmed := strings.TrimSpace(scanner.Text())
+
+		if strings.HasPrefix(trimmed, "qdisc tbf") {
+			inTbf = true
 			continue
 		}
-
-		parts := strings.Fields(line)
-		if len(parts) < 2 {
+		if !inTbf {
 			continue
 		}
-
-		val, err := strconv.ParseFloat(parts[len(parts)-1], 64)
-		if err != nil {
-			// sometimes there's a timestamp as the last field
-			if len(parts) >= 3 {
-				val, err = strconv.ParseFloat(parts[len(parts)-2], 64)
-				if err != nil {
-					continue
+		// new qdisc block — tbf section is done
+		if strings.HasPrefix(trimmed, "qdisc") {
+			break
+		}
+		// "Sent ... (dropped N, overlimits N requeues N)"
+		if strings.Contains(trimmed, "overlimits") {
+			idx := strings.Index(trimmed, "overlimits")
+			after := strings.Fields(trimmed[idx:])
+			if len(after) >= 2 {
+				v, err := strconv.ParseUint(after[1], 10, 64)
+				if err == nil {
+					overlimits = v
 				}
-			} else {
-				continue
 			}
 		}
-
-		nameAndLabels := parts[0]
-
-		// handle summary quantile lines, e.g.:
-		//   etcd_network_peer_round_trip_time_seconds{quantile="0.99"} 0.003
-		if strings.Contains(nameAndLabels, `quantile="0.99"`) {
-			base := nameAndLabels[:strings.Index(nameAndLabels, "{")]
-			out[base+"_p99"] = val
-			continue
+		// "backlog Nb Np requeues N"  — N followed by 'b' suffix
+		if strings.HasPrefix(trimmed, "backlog") {
+			fields := strings.Fields(trimmed)
+			if len(fields) >= 2 {
+				raw := strings.TrimSuffix(fields[1], "b")
+				v, err := strconv.ParseUint(raw, 10, 64)
+				if err == nil {
+					backlogBytes = v
+				}
+			}
 		}
-
-		// strip label set
-		if idx := strings.Index(nameAndLabels, "{"); idx != -1 {
-			nameAndLabels = nameAndLabels[:idx]
-		}
-		// sum across all label combinations (e.g. per-peer counters)
-		out[nameAndLabels] += val
 	}
-	return out
+	return
 }
-
